@@ -85,3 +85,18 @@ class ShopifyAPIExtractor:
         """Extrai todas as locations (warehouses/lojas) da conta."""
         logger.info("Extracting locations")
         return self._get("locations")
+
+    def get_order_by_id(self, order_id: str) -> list:
+        """Extrai um pedido específico pelo ID."""
+        logger.info(f"Extracting order {order_id}")
+        try:
+            response = requests.get(
+                f"{self.base_url}/orders/{order_id}.json",
+                headers=self.headers, timeout=10,
+            )
+            response.raise_for_status()
+            order = response.json().get("order")
+            return [order] if order else []
+        except Exception as e:
+            logger.error(f"Failed to fetch order {order_id}: {e}")
+            return []

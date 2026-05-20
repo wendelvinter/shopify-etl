@@ -1,0 +1,32 @@
+{
+  "etl_orders": {
+    "label": "Orders",
+    "enabled": true,
+    "frequency": "every_n_minutes",
+    "time": "06:00",
+    "day_of_week": "mon",
+    "every_n": 15,
+    "date_range": "last_n_days",
+    "days_back": 60
+  },
+  "etl_fulfillments": {
+    "label": "Fulfillments + Events",
+    "enabled": true,
+    "frequency": "every_n_minutes",
+    "time": "07:00",
+    "day_of_week": "mon",
+    "every_n": 15,
+    "date_range": "last_n_days",
+    "days_back": 60
+  },
+  "etl_locations": {
+    "label": "Locations",
+    "enabled": true,
+    "frequency": "weekly",
+    "time": "05:00",
+    "day_of_week": "mon",
+    "every_n": 7,
+    "date_range": "last_n_days",
+    "days_back": 30
+  }
+}

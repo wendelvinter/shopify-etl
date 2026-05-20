@@ -147,7 +147,142 @@ async def lifespan(_):
 
 app = FastAPI(title="Shopify ETL Control Panel", lifespan=lifespan)
 
-_oauth_states: dict = {}  # state -> timestamp
+_oauth_states: dict = {}
+_running_procs: dict = {}
+
+CONFIG_CHANGES_FILE = ROOT / "config" / "config_changes.json"
+
+# -- i18n ---------------------------------------------------------------------
+TRANSLATIONS = {
+    "en": {
+        "nav_dashboard": "Dashboard", "nav_setup": "Setup",
+        "card_config": "Configuration", "card_tables": "Tables",
+        "card_run_etl": "Run ETL", "card_recent_runs": "Recent Runs",
+        "card_volume": "Processed Volume", "card_log": "Today's Log",
+        "label_script": "Script", "label_start_date": "Start date",
+        "label_end_date": "End date", "btn_run": "&#9654; Run",
+        "label_run_by_order": "Or run by specific Order ID",
+        "btn_run_order": "&#9654; Run Order",
+        "filter_all_scripts": "All scripts", "filter_all_status": "All status",
+        "th_script": "Script", "th_start": "Start", "th_end": "End",
+        "th_status": "Status", "th_records": "Records", "th_ins_upd": "Ins/Upd",
+        "th_duration": "Duration", "th_finished": "Finished at", "th_error": "Error",
+        "sched_paused": "Paused", "sched_active": "Active",
+        "btn_pause": "&#9208; Pause", "btn_resume": "&#9654; Resume",
+        "label_shopify_store": "Shopify Store", "label_sql_host": "SQL Server Host",
+        "label_database": "Database", "last_update": "Last update",
+        "modal_error_title": "Full error",
+        "sched_inactive": "Inactive", "sched_enable": "Enable schedule",
+        "sched_repeat": "Repeat",
+        "sched_every_n_min": "Every N minutes", "sched_every_n_hours": "Every N hours",
+        "sched_daily": "Every day", "sched_weekdays": "Weekdays (Mon–Fri)",
+        "sched_weekly": "Once a week", "sched_every_n_days": "Every N days",
+        "sched_dow": "Day of week", "sched_time": "At what time? (UTC)",
+        "sched_n_minutes": "How many minutes?", "sched_n_hours": "How many hours?",
+        "sched_n_days": "How many days?",
+        "sched_data": "Data to pull", "sched_since_yesterday": "Since yesterday",
+        "sched_last_n_days": "Last N days", "sched_days_back": "How many days back?",
+        "sched_next_run": "Next run", "btn_save": "Save", "btn_run_now": "&#9654; Run now",
+        "card_oauth": "Authorize App (OAuth)", "badge_recommended": "Recommended",
+        "oauth_desc": "Authorize <strong>Logistics_ETL</strong> in the store via OAuth. The access token is captured and saved automatically. Do this once per store.",
+        "label_store_url": "Store URL", "label_client_id": "Client ID",
+        "label_client_secret": "Client Secret",
+        "btn_oauth_authorize": "Save and Authorize on Shopify",
+        "card_shopify_api": "Shopify API", "label_access_token": "Access Token",
+        "label_api_version": "API Version", "btn_test": "Test Connection",
+        "card_sql": "SQL Server", "label_host": "Host", "label_port": "Port",
+        "label_username": "Username", "label_password": "Password",
+        "card_config_changes": "Config Change Log", "no_changes": "No changes recorded.",
+        "card_scheduling": "Scheduling",
+        "sched_desc": "Configure automated runs per category. Times are in UTC. Changes take effect immediately without restarting the server.",
+        "loading": "Loading...", "saving": "Saving...", "starting": "Starting...",
+        "testing": "Testing...", "saved": "&#10003; Saved", "started": "&#10003; Started",
+        "confirm_cancel": "Cancel this run?", "type_order_id": "Enter an Order ID.",
+        "oauth_required": "Store URL, Client ID and Client Secret are required.",
+        "oauth_success_msg": "App authorized successfully. Access token saved to .env.",
+        "apscheduler_active": "APScheduler active",
+        "apscheduler_missing": "APScheduler not installed",
+        "dow_mon": "Monday", "dow_tue": "Tuesday", "dow_wed": "Wednesday",
+        "dow_thu": "Thursday", "dow_fri": "Friday", "dow_sat": "Saturday", "dow_sun": "Sunday",
+    },
+    "pt": {
+        "nav_dashboard": "Dashboard", "nav_setup": "Configurações",
+        "card_config": "Configuração", "card_tables": "Tabelas",
+        "card_run_etl": "Executar ETL", "card_recent_runs": "Execuções Recentes",
+        "card_volume": "Volume Processado", "card_log": "Log de Hoje",
+        "label_script": "Script", "label_start_date": "Data inicial",
+        "label_end_date": "Data final", "btn_run": "&#9654; Executar",
+        "label_run_by_order": "Ou executar por Order ID específico",
+        "btn_run_order": "&#9654; Executar Order",
+        "filter_all_scripts": "Todos os scripts", "filter_all_status": "Todos os status",
+        "th_script": "Script", "th_start": "Início", "th_end": "Fim",
+        "th_status": "Status", "th_records": "Registros", "th_ins_upd": "Ins/Upd",
+        "th_duration": "Duração", "th_finished": "Finalizado em", "th_error": "Erro",
+        "sched_paused": "Pausado", "sched_active": "Ativo",
+        "btn_pause": "&#9208; Pausar", "btn_resume": "&#9654; Retomar",
+        "label_shopify_store": "Loja Shopify", "label_sql_host": "Servidor SQL",
+        "label_database": "Banco de Dados", "last_update": "Última atualização",
+        "modal_error_title": "Erro completo",
+        "sched_inactive": "Inativo", "sched_enable": "Ativar agendamento",
+        "sched_repeat": "Repetir",
+        "sched_every_n_min": "A cada N minutos", "sched_every_n_hours": "A cada N horas",
+        "sched_daily": "Todo dia", "sched_weekdays": "Dias úteis (Seg–Sex)",
+        "sched_weekly": "Uma vez por semana", "sched_every_n_days": "A cada N dias",
+        "sched_dow": "Dia da semana", "sched_time": "Horário? (UTC)",
+        "sched_n_minutes": "A cada quantos minutos?", "sched_n_hours": "A cada quantas horas?",
+        "sched_n_days": "A cada quantos dias?",
+        "sched_data": "Dados a buscar", "sched_since_yesterday": "Desde ontem",
+        "sched_last_n_days": "Últimos N dias", "sched_days_back": "Quantos dias atrás?",
+        "sched_next_run": "Próxima execução", "btn_save": "Salvar", "btn_run_now": "&#9654; Executar agora",
+        "card_oauth": "Autorizar App (OAuth)", "badge_recommended": "Recomendado",
+        "oauth_desc": "Autorize o <strong>Logistics_ETL</strong> na loja via OAuth. O access token é capturado e salvo automaticamente. Faça isso uma vez por loja.",
+        "label_store_url": "URL da Loja", "label_client_id": "Client ID",
+        "label_client_secret": "Client Secret",
+        "btn_oauth_authorize": "Salvar e Autorizar no Shopify",
+        "card_shopify_api": "Shopify API", "label_access_token": "Access Token",
+        "label_api_version": "Versão da API", "btn_test": "Testar Conexão",
+        "card_sql": "SQL Server", "label_host": "Host", "label_port": "Porta",
+        "label_username": "Usuário", "label_password": "Senha",
+        "card_config_changes": "Log de Alterações", "no_changes": "Nenhuma alteração registrada.",
+        "card_scheduling": "Agendamento",
+        "sched_desc": "Configure execuções automáticas por categoria. Horários em UTC. As alterações têm efeito imediato sem reiniciar o servidor.",
+        "loading": "Carregando...", "saving": "Salvando...", "starting": "Iniciando...",
+        "testing": "Testando...", "saved": "&#10003; Salvo", "started": "&#10003; Iniciado",
+        "confirm_cancel": "Cancelar este run?", "type_order_id": "Digite um Order ID.",
+        "oauth_required": "URL da loja, Client ID e Client Secret são obrigatórios.",
+        "oauth_success_msg": "App autorizado com sucesso. Access token salvo no .env.",
+        "apscheduler_active": "APScheduler ativo",
+        "apscheduler_missing": "APScheduler não instalado",
+        "dow_mon": "Segunda", "dow_tue": "Terça", "dow_wed": "Quarta",
+        "dow_thu": "Quinta", "dow_fri": "Sexta", "dow_sat": "Sábado", "dow_sun": "Domingo",
+    },
+}
+
+
+def get_lang(request: Request) -> str:
+    return request.cookies.get("lang", "pt")
+
+
+def log_config_change(changed_keys: list):
+    entry = {"timestamp": datetime.now().isoformat(), "keys": changed_keys}
+    changes = []
+    if CONFIG_CHANGES_FILE.exists():
+        try:
+            changes = json.loads(CONFIG_CHANGES_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    changes.insert(0, entry)
+    CONFIG_CHANGES_FILE.write_text(json.dumps(changes[:200], indent=2), encoding="utf-8")
+
+
+def get_config_changes(limit: int = 30) -> list:
+    if not CONFIG_CHANGES_FILE.exists():
+        return []
+    try:
+        return json.loads(CONFIG_CHANGES_FILE.read_text(encoding="utf-8"))[:limit]
+    except Exception:
+        return []
+
 
 # -- .env helpers -------------------------------------------------------------
 def read_env() -> dict:
@@ -203,27 +338,62 @@ def get_db_stats():
     return stats
 
 
-def get_recent_runs(limit=10):
+def get_recent_runs(limit=20, script_filter="", status_filter=""):
     runs = []
     try:
         from loaders.sqlserver_loader import get_connection
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute(f"""
-            SELECT TOP {limit} script_name, start_date, end_date,
-                   status, records_processed, error_message, finished_at
-            FROM etl_run_log ORDER BY run_id DESC
-        """)
+        where_parts = []
+        params = []
+        if script_filter:
+            where_parts.append("script_name = ?")
+            params.append(script_filter)
+        if status_filter:
+            where_parts.append("status = ?")
+            params.append(status_filter)
+        where = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+        try:
+            sql = f"""
+                SELECT TOP {limit} script_name, start_date, end_date, status,
+                       records_processed, error_message, finished_at,
+                       ISNULL(inserts,0), ISNULL(updates,0), pid,
+                       DATEDIFF(second, started_at, ISNULL(finished_at, SYSDATETIMEOFFSET()))
+                FROM etl_run_log {where} ORDER BY run_id DESC
+            """
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
+        except Exception:
+            sql = f"""
+                SELECT TOP {limit} script_name, start_date, end_date, status,
+                       records_processed, error_message, finished_at,
+                       0, 0, NULL, NULL
+                FROM etl_run_log {where} ORDER BY run_id DESC
+            """
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
         for row in cursor.fetchall():
+            dur = row[10]
+            if dur is not None:
+                dur_str = f"{dur//60}m {dur%60}s" if dur >= 60 else f"{dur}s"
+            else:
+                dur_str = "—"
             runs.append({
                 "script": row[0] or "—", "start": str(row[1]), "end": str(row[2]),
                 "status": row[3] or "—", "records": row[4] or 0,
                 "error": row[5] or "", "finished_at": str(row[6])[:19] if row[6] else "—",
+                "inserts": row[7] or 0, "updates": row[8] or 0,
+                "pid": row[9], "duration": dur_str,
             })
         conn.close()
     except Exception as e:
-        runs = [{"script": "—", "status": "error", "error": str(e)[:80],
-                 "records": 0, "start": "—", "end": "—", "finished_at": "—"}]
+        runs = [{"script": "—", "status": "error", "error": str(e)[:120],
+                 "records": 0, "start": "—", "end": "—", "finished_at": "—",
+                 "inserts": 0, "updates": 0, "pid": None, "duration": "—"}]
     return runs
 
 
@@ -235,10 +405,14 @@ header { background: #1a1a1a; color: white; padding: 14px 32px; display: flex; a
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand h1 { font-size: 18px; font-weight: 500; }
 .tag { font-size: 12px; background: #333; padding: 3px 8px; border-radius: 4px; color: #aaa; }
-nav { display: flex; gap: 4px; }
+nav { display: flex; gap: 4px; align-items: center; }
 nav a { color: #aaa; text-decoration: none; font-size: 14px; padding: 7px 16px; border-radius: 6px; transition: all .15s; }
 nav a:hover { background: #333; color: white; }
 nav a.active { background: #444; color: white; font-weight: 500; }
+.lang-switcher { display: flex; gap: 2px; margin-left: 12px; border-left: 1px solid #333; padding-left: 12px; }
+.lang-btn { background: none; border: 1px solid transparent; color: #aaa; font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 4px; cursor: pointer; transition: all .15s; letter-spacing: .5px; }
+.lang-btn:hover { color: white; border-color: #555; }
+.lang-btn.active { color: white; border-color: #666; background: #333; }
 .container { max-width: 1100px; margin: 32px auto; padding: 0 24px; display: grid; gap: 24px; }
 .card { background: white; border-radius: 10px; padding: 24px; border: 1px solid #e5e5e5; }
 .card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
@@ -265,7 +439,6 @@ input:focus, select:focus { outline: none; border-color: #1a1a1a; box-shadow: 0 
 .result.ok    { background: #d4edda; color: #155724; display: block; }
 .result.error { background: #f8d7da; color: #721c24; display: block; }
 .sep { border: none; border-top: 1px solid #f0f0f0; margin: 20px 0; }
-/* Toggle switch */
 .toggle-wrap { display: flex; align-items: center; gap: 10px; }
 .toggle { position: relative; display: inline-block; width: 44px; height: 24px; flex-shrink: 0; }
 .toggle input { opacity: 0; width: 0; height: 0; }
@@ -314,13 +487,16 @@ SETUP_CSS = """
 """
 
 
-def page(body: str, active: str) -> str:
+def page(body: str, active: str, lang: str = "pt") -> str:
+    t = TRANSLATIONS[lang]
     da = 'class="active"' if active == "dashboard" else ""
     sa = 'class="active"' if active == "setup" else ""
     extra_css = DASHBOARD_CSS if active == "dashboard" else SETUP_CSS
-    title = "Control Panel" if active == "dashboard" else "Setup"
+    title = t["nav_dashboard"] if active == "dashboard" else t["nav_setup"]
+    en_active = 'active' if lang == 'en' else ''
+    pt_active = 'active' if lang == 'pt' else ''
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="{lang}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -334,98 +510,215 @@ def page(body: str, active: str) -> str:
     <span class="tag">Logistics San Diego</span>
   </div>
   <nav>
-    <a href="/" {da}>Dashboard</a>
-    <a href="/setup" {sa}>Setup</a>
+    <a href="/" {da}>{t["nav_dashboard"]}</a>
+    <a href="/setup" {sa}>{t["nav_setup"]}</a>
+    <div class="lang-switcher">
+      <button class="lang-btn {pt_active}" onclick="setLang('pt')">PT</button>
+      <button class="lang-btn {en_active}" onclick="setLang('en')">EN</button>
+    </div>
   </nav>
 </header>
 {body}
+<script>
+function setLang(lang) {{
+  document.cookie = 'lang=' + lang + ';path=/;max-age=31536000';
+  location.reload();
+}}
+</script>
 </body>
 </html>"""
 
 
 # -- Dashboard ----------------------------------------------------------------
-def render_dashboard(stats, runs):
+def render_dashboard(stats, runs, lang: str = "pt"):
+    t = TRANSLATIONS[lang]
+
     stats_html = "".join(f"""
     <div class="stat-card">
       <div class="label">{s['table']}</div>
       <div class="value">{s['count']:,}</div>
-      <div class="sub">Last update: {s['last_update']}</div>
+      <div class="sub">{t['last_update']}: {s['last_update']}</div>
     </div>""" for s in stats)
 
-    runs_html = "".join(f"""
+    def _run_row(r):
+        sc = r['status']
+        err_short = str(r['error'])[:80] + ("…" if len(str(r['error'])) > 80 else "")
+        cancel_btn = (
+            f'<button class="btn btn-outline btn-sm" style="color:#c00;border-color:#f8d7da;" '
+            f'onclick="cancelRun({r["pid"]})">&#9632;</button>'
+            if r.get("pid") and r["finished_at"] == "—" else ""
+        )
+        ins_upd = f'{r["inserts"]:,} / {r["updates"]:,}' if (r.get("inserts") or r.get("updates")) else "—"
+        return f"""
     <tr>
       <td>{r['script']}</td><td>{r['start']}</td><td>{r['end']}</td>
-      <td><span class="status-{'success' if r['status']=='success' else 'error'}">{r['status']}</span></td>
-      <td>{int(r['records']):,}</td><td>{r['finished_at']}</td>
-      <td style="color:#aaa;font-size:11px;">{str(r['error'])[:80]}</td>
-    </tr>""" for r in runs)
+      <td><span class="status-{'success' if sc=='success' else 'error'}">{sc}</span></td>
+      <td style="font-size:12px;">{int(r['records']):,}</td>
+      <td style="font-size:12px;color:#888;">{ins_upd}</td>
+      <td style="font-size:12px;color:#888;">{r['duration']}</td>
+      <td style="font-size:12px;">{r['finished_at']}</td>
+      <td style="color:#aaa;font-size:11px;cursor:pointer;max-width:200px;"
+          title="{t['modal_error_title']}" onclick="showError(this)"
+          data-full="{str(r['error']).replace(chr(34), '&quot;')}">{err_short}</td>
+      <td>{cancel_btn}</td>
+    </tr>"""
+
+    runs_html = "".join(_run_row(r) for r in runs)
 
     env = read_env()
-    shopify = env.get("SHOPIFY_STORE_URL", "Not configured")
-    db_host = env.get("SQL_SERVER_HOST", "Not configured")
-    db_name = env.get("SQL_SERVER_DATABASE", "Not configured")
+    shopify = env.get("SHOPIFY_STORE_URL", "—")
+    db_host = env.get("SQL_SERVER_HOST", "—")
+    db_name = env.get("SQL_SERVER_DATABASE", "—")
+
+    sched_status = "—"
+    next_runs_html = ""
+    sched_btn = ""
+    if HAS_SCHEDULER:
+        from apscheduler.schedulers.base import STATE_PAUSED
+        paused = _scheduler.state == STATE_PAUSED
+        sched_status = (
+            f'<span class="badge badge-red">{t["sched_paused"]}</span>' if paused
+            else f'<span class="badge badge-green">{t["sched_active"]}</span>'
+        )
+        pause_label = t["btn_resume"] if paused else t["btn_pause"]
+        pause_action = "resumeScheduler" if paused else "pauseScheduler"
+        sched_btn = f'<button class="btn btn-outline btn-sm" onclick="{pause_action}()">{pause_label}</button>'
+        jobs_html = ""
+        for job in _scheduler.get_jobs():
+            nrt = str(job.next_run_time)[:19] if job.next_run_time else "—"
+            jobs_html += f'<div class="info-badge"><strong>{job.id}</strong>{nrt}</div>'
+        next_runs_html = f'<div class="config-row" style="margin-top:12px;">{jobs_html}</div>' if jobs_html else ""
+
+    # JS messages for client-side use
+    js_msgs = json.dumps({
+        "confirm_cancel": t["confirm_cancel"],
+        "type_order_id": t["type_order_id"],
+        "loading": t["loading"],
+        "last_update": t["last_update"],
+        "modal_error_title": t["modal_error_title"],
+    })
 
     body = f"""
 <div class="container">
   <div class="card">
-    <div class="card-header"><h2>Configuration</h2></div>
-    <div class="config-row">
-      <div class="info-badge"><strong>Shopify Store</strong>{shopify}</div>
-      <div class="info-badge"><strong>SQL Server Host</strong>{db_host}</div>
-      <div class="info-badge"><strong>Database</strong>{db_name}</div>
+    <div class="card-header">
+      <h2>{t['card_config']}</h2>
+      <div style="display:flex;align-items:center;gap:10px;">{sched_status}{sched_btn}</div>
     </div>
+    <div class="config-row">
+      <div class="info-badge"><strong>{t['label_shopify_store']}</strong>{shopify}</div>
+      <div class="info-badge"><strong>{t['label_sql_host']}</strong>{db_host}</div>
+      <div class="info-badge"><strong>{t['label_database']}</strong>{db_name}</div>
+    </div>
+    {next_runs_html}
   </div>
 
   <div class="card">
     <div class="card-header">
-      <h2>Tables</h2>
+      <h2>{t['card_tables']}</h2>
       <button class="refresh-btn" onclick="refreshStats()">&#8635; Refresh</button>
     </div>
     <div class="stats-grid" id="stats-grid">{stats_html}</div>
   </div>
 
   <div class="card">
-    <div class="card-header"><h2>Run ETL</h2></div>
+    <div class="card-header"><h2>{t['card_run_etl']}</h2></div>
     <div class="etl-form">
       <div class="field">
-        <label>Script</label>
+        <label>{t['label_script']}</label>
         <select id="script">
           <option value="etl_orders">Orders</option>
           <option value="etl_fulfillments">Fulfillments + Events</option>
           <option value="etl_locations">Locations</option>
         </select>
       </div>
-      <div class="field"><label>Start date</label><input type="date" id="start-date"></div>
-      <div class="field"><label>End date</label><input type="date" id="end-date"></div>
-      <button class="btn btn-dark" onclick="runETL()">&#9654; Run</button>
+      <div class="field"><label>{t['label_start_date']}</label><input type="date" id="start-date"></div>
+      <div class="field"><label>{t['label_end_date']}</label><input type="date" id="end-date"></div>
+      <button class="btn btn-dark" onclick="runETL()">{t['btn_run']}</button>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:10px;align-items:flex-end;">
+      <div class="field" style="max-width:260px;">
+        <label style="font-size:12px;color:#555;">{t['label_run_by_order']}</label>
+        <input type="text" id="order-id-input" placeholder="ex: 6995328762108">
+      </div>
+      <button class="btn btn-outline" onclick="runByOrderId()">{t['btn_run_order']}</button>
     </div>
     <div id="alert"></div>
   </div>
 
   <div class="card">
     <div class="card-header">
-      <h2>Recent runs</h2>
-      <button class="refresh-btn" onclick="refreshRuns()">&#8635; Refresh</button>
+      <h2>{t['card_recent_runs']}</h2>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <select id="filter-script" onchange="refreshRuns()" style="font-size:12px;padding:4px 8px;border:1px solid #ddd;border-radius:4px;">
+          <option value="">{t['filter_all_scripts']}</option>
+          <option value="etl_orders">Orders</option>
+          <option value="etl_fulfillments">Fulfillments</option>
+          <option value="etl_locations">Locations</option>
+        </select>
+        <select id="filter-status" onchange="refreshRuns()" style="font-size:12px;padding:4px 8px;border:1px solid #ddd;border-radius:4px;">
+          <option value="">{t['filter_all_status']}</option>
+          <option value="success">Success</option>
+          <option value="error">Error</option>
+        </select>
+        <button class="refresh-btn" onclick="refreshRuns()">&#8635; Refresh</button>
+      </div>
     </div>
     <table id="runs-table">
-      <thead><tr><th>Script</th><th>Start</th><th>End</th><th>Status</th><th>Records</th><th>Finished at</th><th>Error</th></tr></thead>
+      <thead><tr>
+        <th>{t['th_script']}</th><th>{t['th_start']}</th><th>{t['th_end']}</th>
+        <th>{t['th_status']}</th><th>{t['th_records']}</th><th>{t['th_ins_upd']}</th>
+        <th>{t['th_duration']}</th><th>{t['th_finished']}</th><th>{t['th_error']}</th><th></th>
+      </tr></thead>
       <tbody>{runs_html}</tbody>
     </table>
   </div>
 
   <div class="card">
     <div class="card-header">
-      <h2>Today's log</h2>
+      <h2>{t['card_volume']}</h2>
+      <button class="refresh-btn" onclick="refreshChart()">&#8635; Refresh</button>
+    </div>
+    <canvas id="volume-chart" style="max-height:260px;"></canvas>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h2>{t['card_log']}</h2>
       <button class="refresh-btn" onclick="refreshLogs()">&#8635; Refresh</button>
     </div>
-    <div id="log-box">Loading...</div>
+    <div id="log-box">{t['loading']}</div>
   </div>
 </div>
+
+<!-- Error modal -->
+<div id="error-modal" onclick="this.style.display='none'"
+     style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:999;align-items:center;justify-content:center;">
+  <div onclick="event.stopPropagation()"
+       style="background:white;border-radius:10px;padding:24px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto;position:relative;">
+    <button onclick="document.getElementById('error-modal').style.display='none'"
+            style="position:absolute;top:12px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;">&#x2715;</button>
+    <h3 style="margin-bottom:12px;font-size:14px;color:#666;">{t['modal_error_title']}</h3>
+    <pre id="error-modal-text" style="white-space:pre-wrap;font-size:13px;color:#721c24;background:#f8d7da;padding:12px;border-radius:6px;"></pre>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
+  const MSGS = {js_msgs};
   const today = new Date().toISOString().split('T')[0];
   const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
   document.getElementById('start-date').value = yesterday;
   document.getElementById('end-date').value = today;
+
+  let volumeChart = null;
+
+  function showError(el) {{
+    const full = el.getAttribute('data-full');
+    if (!full) return;
+    document.getElementById('error-modal-text').textContent = full;
+    document.getElementById('error-modal').style.display = 'flex';
+  }}
 
   async function runETL() {{
     const body = new FormData();
@@ -441,6 +734,40 @@ def render_dashboard(stats, runs):
     setTimeout(refreshRuns, 3000);
   }}
 
+  async function runByOrderId() {{
+    const orderId = document.getElementById('order-id-input').value.trim();
+    if (!orderId) {{ alert(MSGS.type_order_id); return; }}
+    const body = new FormData();
+    body.append('order_id', orderId);
+    const res = await fetch('/run-order', {{ method: 'POST', body }});
+    const data = await res.json();
+    const el = document.getElementById('alert');
+    el.className = data.status === 'started' ? 'success' : 'error';
+    el.textContent = data.message;
+    setTimeout(() => {{ el.className = ''; el.textContent = ''; }}, 5000);
+    setTimeout(refreshRuns, 3000);
+  }}
+
+  async function cancelRun(pid) {{
+    if (!confirm(MSGS.confirm_cancel)) return;
+    const body = new FormData();
+    body.append('pid', pid);
+    const res = await fetch('/api/runs/cancel', {{ method: 'POST', body }});
+    const data = await res.json();
+    alert(data.message);
+    refreshRuns();
+  }}
+
+  async function pauseScheduler() {{
+    await fetch('/api/scheduler/pause', {{ method: 'POST' }});
+    location.reload();
+  }}
+
+  async function resumeScheduler() {{
+    await fetch('/api/scheduler/resume', {{ method: 'POST' }});
+    location.reload();
+  }}
+
   async function refreshStats() {{
     const res = await fetch('/api/stats');
     const data = await res.json();
@@ -448,20 +775,55 @@ def render_dashboard(stats, runs):
       <div class="stat-card">
         <div class="label">${{s.table}}</div>
         <div class="value">${{Number(s.count).toLocaleString()}}</div>
-        <div class="sub">Last update: ${{s.last_update}}</div>
+        <div class="sub">${{MSGS.last_update}}: ${{s.last_update}}</div>
       </div>`).join('');
   }}
 
   async function refreshRuns() {{
-    const res = await fetch('/api/runs');
+    const script = document.getElementById('filter-script').value;
+    const status = document.getElementById('filter-status').value;
+    const params = new URLSearchParams();
+    if (script) params.append('script', script);
+    if (status) params.append('status', status);
+    const res = await fetch('/api/runs?' + params);
     const runs = await res.json();
-    document.querySelector('#runs-table tbody').innerHTML = runs.map(r => `
-      <tr>
+    document.querySelector('#runs-table tbody').innerHTML = runs.map(r => {{
+      const errShort = (r.error||'').length > 80 ? (r.error||'').slice(0,80)+'…' : (r.error||'');
+      const insUpd = (r.inserts||r.updates) ? `${{r.inserts||0}}/${{r.updates||0}}` : '—';
+      const cancelBtn = (r.pid && r.finished_at === '—')
+        ? `<button class="btn btn-outline btn-sm" style="color:#c00;border-color:#f8d7da;" onclick="cancelRun(${{r.pid}})">&#9632;</button>` : '';
+      return `<tr>
         <td>${{r.script}}</td><td>${{r.start}}</td><td>${{r.end}}</td>
         <td><span class="status-${{r.status==='success'?'success':'error'}}">${{r.status}}</span></td>
-        <td>${{Number(r.records||0).toLocaleString()}}</td><td>${{r.finished_at}}</td>
-        <td style="color:#aaa;font-size:11px;">${{(r.error||'').slice(0,80)}}</td>
-      </tr>`).join('');
+        <td style="font-size:12px;">${{Number(r.records||0).toLocaleString()}}</td>
+        <td style="font-size:12px;color:#888;">${{insUpd}}</td>
+        <td style="font-size:12px;color:#888;">${{r.duration||'—'}}</td>
+        <td style="font-size:12px;">${{r.finished_at}}</td>
+        <td style="color:#aaa;font-size:11px;cursor:pointer;max-width:200px;"
+            title="${{MSGS.modal_error_title}}" onclick="showError(this)"
+            data-full="${{(r.error||'').replace(/"/g,'&quot;')}}">${{errShort}}</td>
+        <td>${{cancelBtn}}</td>
+      </tr>`;
+    }}).join('');
+  }}
+
+  async function refreshChart() {{
+    try {{
+      const res = await fetch('/api/stats/chart');
+      const data = await res.json();
+      if (!data.labels || !data.datasets) return;
+      const ctx = document.getElementById('volume-chart').getContext('2d');
+      if (volumeChart) volumeChart.destroy();
+      volumeChart = new Chart(ctx, {{
+        type: 'bar',
+        data: data,
+        options: {{
+          responsive: true,
+          plugins: {{ legend: {{ position: 'top' }} }},
+          scales: {{ x: {{ stacked: false }}, y: {{ beginAtZero: true }} }}
+        }}
+      }});
+    }} catch(e) {{}}
   }}
 
   async function refreshLogs() {{
@@ -473,13 +835,14 @@ def render_dashboard(stats, runs):
   }}
 
   refreshLogs();
+  refreshChart();
   setInterval(refreshLogs, 10000);
 </script>"""
-    return page(body, "dashboard")
+    return page(body, "dashboard", lang)
 
 
 # -- Setup page ---------------------------------------------------------------
-def _sched_card(name: str, cfg: dict, next_run: str) -> str:
+def _sched_card(name: str, cfg: dict, next_run: str, t: dict) -> str:
     label = cfg.get("label", name)
     enabled = cfg.get("enabled", False)
     freq = cfg.get("frequency", "daily")
@@ -490,25 +853,31 @@ def _sched_card(name: str, cfg: dict, next_run: str) -> str:
     days_back = cfg.get("days_back", 1)
 
     status_badge = (
-        f'<span class="badge badge-green">&#9679; Active</span>'
+        f'<span class="badge badge-green">&#9679; {t["sched_active"]}</span>'
         if enabled else
-        f'<span class="badge badge-gray">&#9675; Inactive</span>'
+        f'<span class="badge badge-gray">&#9675; {t["sched_inactive"]}</span>'
     )
     dow_hidden  = "" if freq == "weekly" else "hidden"
     n_hidden    = "" if freq in ("every_n_days", "every_n_hours", "every_n_minutes") else "hidden"
-    n_label     = {"every_n_minutes": "A cada quantos minutos?", "every_n_hours": "A cada quantas horas?", "every_n_days": "A cada quantos dias?"}.get(freq, "A cada quantos dias?")
+    n_label_map = {
+        "every_n_minutes": t["sched_n_minutes"],
+        "every_n_hours": t["sched_n_hours"],
+        "every_n_days": t["sched_n_days"],
+    }
+    n_label = n_label_map.get(freq, t["sched_n_days"])
     days_hidden = "" if date_range == "last_n_days" else "hidden"
     next_html = (
-        f'<div class="next-run">Next run: <strong>{next_run}</strong></div>'
+        f'<div class="next-run">{t["sched_next_run"]}: <strong>{next_run}</strong></div>'
         if enabled and next_run != "—" else ""
     )
 
+    dow_map = [
+        ("mon", t["dow_mon"]), ("tue", t["dow_tue"]), ("wed", t["dow_wed"]),
+        ("thu", t["dow_thu"]), ("fri", t["dow_fri"]), ("sat", t["dow_sat"]), ("sun", t["dow_sun"]),
+    ]
     dow_options = "".join(
         f'<option value="{v}" {"selected" if v == dow else ""}>{lbl}</option>'
-        for v, lbl in [
-            ("mon","Monday"),("tue","Tuesday"),("wed","Wednesday"),
-            ("thu","Thursday"),("fri","Friday"),("sat","Saturday"),("sun","Sunday"),
-        ]
+        for v, lbl in dow_map
     )
 
     return f"""
@@ -527,26 +896,26 @@ def _sched_card(name: str, cfg: dict, next_run: str) -> str:
                onchange="onToggle('{name}')">
         <span class="slider"></span>
       </label>
-      <span class="toggle-label">Enable schedule</span>
+      <span class="toggle-label">{t["sched_enable"]}</span>
     </div>
   </div>
 
   <hr class="sep">
 
   <div class="sched-field">
-    <label>Repeat</label>
+    <label>{t["sched_repeat"]}</label>
     <select id="freq-{name}" onchange="onFreqChange('{name}')">
-      <option value="every_n_minutes"{"selected" if freq=='every_n_minutes' else ""}>A cada N minutos</option>
-      <option value="every_n_hours"  {"selected" if freq=='every_n_hours'   else ""}>A cada N horas</option>
-      <option value="daily"          {"selected" if freq=='daily'           else ""}>Todo dia</option>
-      <option value="weekdays"       {"selected" if freq=='weekdays'        else ""}>Dias úteis (Seg–Sex)</option>
-      <option value="weekly"         {"selected" if freq=='weekly'          else ""}>Uma vez por semana</option>
-      <option value="every_n_days"   {"selected" if freq=='every_n_days'    else ""}>A cada N dias</option>
+      <option value="every_n_minutes"{"selected" if freq=='every_n_minutes' else ""}>{t["sched_every_n_min"]}</option>
+      <option value="every_n_hours"  {"selected" if freq=='every_n_hours'   else ""}>{t["sched_every_n_hours"]}</option>
+      <option value="daily"          {"selected" if freq=='daily'           else ""}>{t["sched_daily"]}</option>
+      <option value="weekdays"       {"selected" if freq=='weekdays'        else ""}>{t["sched_weekdays"]}</option>
+      <option value="weekly"         {"selected" if freq=='weekly'          else ""}>{t["sched_weekly"]}</option>
+      <option value="every_n_days"   {"selected" if freq=='every_n_days'    else ""}>{t["sched_every_n_days"]}</option>
     </select>
   </div>
 
   <div class="sched-field {dow_hidden}" id="dow-wrap-{name}">
-    <label>Day of week</label>
+    <label>{t["sched_dow"]}</label>
     <select id="dow-{name}">{dow_options}</select>
   </div>
 
@@ -557,22 +926,22 @@ def _sched_card(name: str, cfg: dict, next_run: str) -> str:
   </div>
 
   <div class="sched-field">
-    <label>At what time? (UTC)</label>
+    <label>{t["sched_time"]}</label>
     <input type="time" id="time-{name}" value="{time_val}">
   </div>
 
   <hr class="sep">
 
   <div class="sched-field">
-    <label>Data to pull</label>
+    <label>{t["sched_data"]}</label>
     <select id="dr-{name}" onchange="onDrChange('{name}')">
-      <option value="yesterday_today" {"selected" if date_range=='yesterday_today' else ""}>Since yesterday</option>
-      <option value="last_n_days"     {"selected" if date_range=='last_n_days'     else ""}>Last N days</option>
+      <option value="yesterday_today" {"selected" if date_range=='yesterday_today' else ""}>{t["sched_since_yesterday"]}</option>
+      <option value="last_n_days"     {"selected" if date_range=='last_n_days'     else ""}>{t["sched_last_n_days"]}</option>
     </select>
   </div>
 
   <div class="sched-field {days_hidden}" id="days-wrap-{name}">
-    <label>How many days back?</label>
+    <label>{t["sched_days_back"]}</label>
     <input type="number" id="days-{name}" value="{days_back}" min="1" max="365"
            style="max-width:100px;">
   </div>
@@ -580,14 +949,15 @@ def _sched_card(name: str, cfg: dict, next_run: str) -> str:
   {next_html}
 
   <div class="actions-row">
-    <button class="btn btn-dark btn-sm" onclick="saveSched('{name}')">Save</button>
-    <button class="btn btn-outline btn-sm" onclick="runNow('{name}')">&#9654; Run now</button>
+    <button class="btn btn-dark btn-sm" onclick="saveSched('{name}')">{t["btn_save"]}</button>
+    <button class="btn btn-outline btn-sm" onclick="runNow('{name}')">{t["btn_run_now"]}</button>
     <span id="sched-result-{name}" style="font-size:12px;color:#555;"></span>
   </div>
 </div>"""
 
 
-def render_setup(oauth_success: bool = False) -> str:
+def render_setup(oauth_success: bool = False, lang: str = "pt") -> str:
+    t = TRANSLATIONS[lang]
     env = read_env()
     schedules = load_schedules()
 
@@ -610,14 +980,24 @@ def render_setup(oauth_success: bool = False) -> str:
     sql_user = env.get("SQL_SERVER_USER", "")
 
     sched_cards = "".join(
-        _sched_card(name, cfg, next_runs.get(name, "—"))
+        _sched_card(name, cfg, next_runs.get(name, "—"), t)
         for name, cfg in schedules.items()
     )
 
-    oauth_banner = """
+    oauth_banner = f"""
   <div class="card" style="background:#d4edda;border-color:#c3e6cb;">
-    <p style="color:#155724;font-size:14px;font-weight:600;">App autorizado com sucesso. Access token salvo no .env.</p>
+    <p style="color:#155724;font-size:14px;font-weight:600;">{t["oauth_success_msg"]}</p>
   </div>""" if oauth_success else ""
+
+    sched_badge_text = t["apscheduler_active"] if HAS_SCHEDULER else t["apscheduler_missing"]
+
+    js_msgs = json.dumps({
+        "saving": t["saving"], "saved": t["saved"],
+        "starting": t["starting"], "started": t["started"],
+        "testing": t["testing"],
+        "oauth_required": t["oauth_required"],
+        "no_changes": t["no_changes"],
+    })
 
     body = f"""
 <div class="container">
@@ -626,31 +1006,28 @@ def render_setup(oauth_success: bool = False) -> str:
   <!-- OAuth -->
   <div class="card">
     <div class="card-header">
-      <h2>Autorizar App (OAuth)</h2>
-      <span class="badge badge-blue">Recomendado</span>
+      <h2>{t["card_oauth"]}</h2>
+      <span class="badge badge-blue">{t["badge_recommended"]}</span>
     </div>
-    <p style="font-size:13px;color:#666;margin-bottom:16px;">
-      Autorize o <strong>Logistics_ETL</strong> na loja via OAuth. O access token é capturado e salvo automaticamente.
-      Faça isso uma vez por loja.
-    </p>
+    <p style="font-size:13px;color:#666;margin-bottom:16px;">{t["oauth_desc"]}</p>
     <div class="row">
       <div class="field" style="flex:2;min-width:260px;">
-        <label>Store URL</label>
+        <label>{t["label_store_url"]}</label>
         <input type="text" id="oauth-store-url" value="{shopify_url}" placeholder="https://rlm-vix.myshopify.com">
       </div>
     </div>
     <div class="row" style="margin-top:12px;">
       <div class="field" style="flex:2;min-width:260px;">
-        <label>Client ID</label>
+        <label>{t["label_client_id"]}</label>
         <input type="text" id="oauth-client-id" value="{client_id}" placeholder="e7fe782d...">
       </div>
       <div class="field" style="flex:2;min-width:260px;">
-        <label>Client Secret</label>
+        <label>{t["label_client_secret"]}</label>
         <input type="password" id="oauth-client-secret" value="{client_secret}" placeholder="shpss_...">
       </div>
     </div>
     <div class="row" style="margin-top:14px;">
-      <button class="btn btn-dark" onclick="authorizeOAuth()">Salvar e Autorizar no Shopify</button>
+      <button class="btn btn-dark" onclick="authorizeOAuth()">{t["btn_oauth_authorize"]}</button>
     </div>
     <div id="oauth-result" class="result"></div>
   </div>
@@ -658,26 +1035,26 @@ def render_setup(oauth_success: bool = False) -> str:
   <!-- Shopify API -->
   <div class="card">
     <div class="card-header">
-      <h2>Shopify API</h2>
-      <span id="shopify-conn-badge" class="badge badge-gray">Not tested</span>
+      <h2>{t["card_shopify_api"]}</h2>
+      <span id="shopify-conn-badge" class="badge badge-gray">—</span>
     </div>
     <div class="row">
       <div class="field" style="flex:2;min-width:260px;">
-        <label>Store URL</label>
+        <label>{t["label_store_url"]}</label>
         <input type="text" id="shopify-url" value="{shopify_url}" placeholder="https://mystore.myshopify.com">
       </div>
       <div class="field" style="flex:2;min-width:260px;">
-        <label>Access Token</label>
+        <label>{t["label_access_token"]}</label>
         <input type="password" id="shopify-token" value="{shopify_token}" placeholder="shpat_...">
       </div>
       <div class="field" style="max-width:140px;">
-        <label>API Version</label>
+        <label>{t["label_api_version"]}</label>
         <input type="text" id="shopify-version" value="{shopify_version}" placeholder="2024-01">
       </div>
     </div>
     <div class="row" style="margin-top:14px;">
-      <button class="btn btn-outline" onclick="testShopify()">Test Connection</button>
-      <button class="btn btn-dark" onclick="saveShopify()">Save</button>
+      <button class="btn btn-outline" onclick="testShopify()">{t["btn_test"]}</button>
+      <button class="btn btn-dark" onclick="saveShopify()">{t["btn_save"]}</button>
     </div>
     <div id="shopify-result" class="result"></div>
   </div>
@@ -685,63 +1062,83 @@ def render_setup(oauth_success: bool = False) -> str:
   <!-- SQL Server -->
   <div class="card">
     <div class="card-header">
-      <h2>SQL Server</h2>
-      <span id="sql-conn-badge" class="badge badge-gray">Not tested</span>
+      <h2>{t["card_sql"]}</h2>
+      <span id="sql-conn-badge" class="badge badge-gray">—</span>
     </div>
     <div class="row">
       <div class="field" style="flex:2;min-width:200px;">
-        <label>Host</label>
+        <label>{t["label_host"]}</label>
         <input type="text" id="sql-host" value="{sql_host}" placeholder="localhost\\SQLEXPRESS">
       </div>
       <div class="field" style="max-width:100px;">
-        <label>Port</label>
+        <label>{t["label_port"]}</label>
         <input type="text" id="sql-port" value="{sql_port}" placeholder="1433">
       </div>
       <div class="field" style="flex:2;min-width:160px;">
-        <label>Database</label>
+        <label>{t["label_database"]}</label>
         <input type="text" id="sql-db" value="{sql_db}" placeholder="DW_BASE">
       </div>
     </div>
     <div class="row" style="margin-top:12px;">
       <div class="field" style="flex:2;min-width:180px;">
-        <label>Username</label>
+        <label>{t["label_username"]}</label>
         <input type="text" id="sql-user" value="{sql_user}" placeholder="sa">
       </div>
       <div class="field" style="flex:2;min-width:180px;">
-        <label>Password</label>
+        <label>{t["label_password"]}</label>
         <input type="password" id="sql-pass" value="" placeholder="••••••••">
       </div>
     </div>
     <div class="row" style="margin-top:14px;">
-      <button class="btn btn-outline" onclick="testSQL()">Test Connection</button>
-      <button class="btn btn-dark" onclick="saveSQL()">Save</button>
+      <button class="btn btn-outline" onclick="testSQL()">{t["btn_test"]}</button>
+      <button class="btn btn-dark" onclick="saveSQL()">{t["btn_save"]}</button>
     </div>
     <div id="sql-result" class="result"></div>
+  </div>
+
+  <!-- Config Changes -->
+  <div class="card">
+    <div class="card-header">
+      <h2>{t["card_config_changes"]}</h2>
+      <button class="refresh-btn" onclick="loadConfigChanges()">&#8635; Refresh</button>
+    </div>
+    <div id="config-changes-list" style="font-size:13px;color:#555;">{t["loading"]}</div>
   </div>
 
   <!-- Scheduling -->
   <div class="card">
     <div class="card-header">
-      <h2>Scheduling</h2>
-      <span class="badge badge-blue">{"APScheduler active" if HAS_SCHEDULER else "APScheduler not installed"}</span>
+      <h2>{t["card_scheduling"]}</h2>
+      <span class="badge badge-blue">{sched_badge_text}</span>
     </div>
-    <p style="font-size:13px;color:#666;margin-bottom:20px;">
-      Configure automated runs per category. Times are in UTC.
-      Changes take effect immediately without restarting the server.
-    </p>
+    <p style="font-size:13px;color:#666;margin-bottom:20px;">{t["sched_desc"]}</p>
     <div class="setup-grid">{sched_cards}</div>
   </div>
 
 </div>
 <script>
-// ---- OAuth -----------------------------------------------------------------
+const MSGS = {js_msgs};
+
+async function loadConfigChanges() {{
+  const res = await fetch('/api/config-changes');
+  const data = await res.json();
+  const el = document.getElementById('config-changes-list');
+  if (!data.length) {{ el.textContent = MSGS.no_changes; return; }}
+  el.innerHTML = data.map(c => `
+    <div style="padding:8px 0;border-bottom:1px solid #f0f0f0;display:flex;gap:12px;align-items:baseline;">
+      <span style="color:#aaa;font-size:11px;white-space:nowrap;">${{c.timestamp?.slice(0,19)||'—'}}</span>
+      <span>${{(c.keys||[]).join(', ')}}</span>
+    </div>`).join('');
+}}
+loadConfigChanges();
+
 async function authorizeOAuth() {{
   const storeUrl     = document.getElementById('oauth-store-url').value.trim();
   const clientId     = document.getElementById('oauth-client-id').value.trim();
   const clientSecret = document.getElementById('oauth-client-secret').value.trim();
   const r = document.getElementById('oauth-result');
   if (!storeUrl || !clientId || !clientSecret) {{
-    r.className = 'result error'; r.textContent = 'Store URL, Client ID e Client Secret são obrigatórios.'; return;
+    r.className = 'result error'; r.textContent = MSGS.oauth_required; return;
   }}
   const body = new FormData();
   body.append('store_url', storeUrl);
@@ -755,10 +1152,9 @@ async function authorizeOAuth() {{
   window.location.href = '/shopify/install';
 }}
 
-// ---- Shopify ---------------------------------------------------------------
 async function testShopify() {{
   const badge = document.getElementById('shopify-conn-badge');
-  badge.className = 'badge badge-gray'; badge.textContent = 'Testing...';
+  badge.className = 'badge badge-gray'; badge.textContent = MSGS.testing;
   const r = document.getElementById('shopify-result');
   r.className = 'result';
   const res = await fetch('/api/setup/test-shopify?' + new URLSearchParams({{
@@ -770,7 +1166,7 @@ async function testShopify() {{
   r.className = 'result ' + (data.status === 'ok' ? 'ok' : 'error');
   r.textContent = data.message;
   badge.className = data.status === 'ok' ? 'badge badge-green' : 'badge badge-red';
-  badge.textContent = data.status === 'ok' ? 'Connected' : 'Failed';
+  badge.textContent = data.status === 'ok' ? '&#10003; OK' : '&#10005; Failed';
 }}
 
 async function saveShopify() {{
@@ -783,13 +1179,13 @@ async function saveShopify() {{
   const r = document.getElementById('shopify-result');
   r.className = 'result ' + (data.status === 'ok' ? 'ok' : 'error');
   r.textContent = data.message;
-  setTimeout(() => r.className = 'result', 3000);
+  if (data.status === 'ok') setTimeout(testShopify, 500);
+  setTimeout(() => r.className = 'result', 5000);
 }}
 
-// ---- SQL -------------------------------------------------------------------
 async function testSQL() {{
   const badge = document.getElementById('sql-conn-badge');
-  badge.className = 'badge badge-gray'; badge.textContent = 'Testing...';
+  badge.className = 'badge badge-gray'; badge.textContent = MSGS.testing;
   const r = document.getElementById('sql-result');
   r.className = 'result';
   const res = await fetch('/api/setup/test-sql?' + new URLSearchParams({{
@@ -803,7 +1199,7 @@ async function testSQL() {{
   r.className = 'result ' + (data.status === 'ok' ? 'ok' : 'error');
   r.textContent = data.message;
   badge.className = data.status === 'ok' ? 'badge badge-green' : 'badge badge-red';
-  badge.textContent = data.status === 'ok' ? 'Connected' : 'Failed';
+  badge.textContent = data.status === 'ok' ? '&#10003; OK' : '&#10005; Failed';
 }}
 
 async function saveSQL() {{
@@ -818,14 +1214,18 @@ async function saveSQL() {{
   const r = document.getElementById('sql-result');
   r.className = 'result ' + (data.status === 'ok' ? 'ok' : 'error');
   r.textContent = data.message;
-  setTimeout(() => r.className = 'result', 3000);
+  if (data.status === 'ok') setTimeout(testSQL, 500);
+  setTimeout(() => r.className = 'result', 5000);
 }}
 
-// ---- Scheduling UI helpers -------------------------------------------------
 function onFreqChange(name) {{
   const freq = document.getElementById('freq-' + name).value;
   const nFreqs = ['every_n_minutes', 'every_n_hours', 'every_n_days'];
-  const labels = {{ every_n_minutes: 'A cada quantos minutos?', every_n_hours: 'A cada quantas horas?', every_n_days: 'A cada quantos dias?' }};
+  const labels = {{
+    every_n_minutes: {json.dumps(TRANSLATIONS["pt"]["sched_n_minutes"])!r},
+    every_n_hours:   {json.dumps(TRANSLATIONS["pt"]["sched_n_hours"])!r},
+    every_n_days:    {json.dumps(TRANSLATIONS["pt"]["sched_n_days"])!r},
+  }};
   document.getElementById('dow-wrap-' + name).classList.toggle('hidden', freq !== 'weekly');
   document.getElementById('n-wrap-'   + name).classList.toggle('hidden', !nFreqs.includes(freq));
   if (labels[freq]) document.getElementById('n-label-' + name).textContent = labels[freq];
@@ -840,13 +1240,13 @@ function onToggle(name) {{
   const enabled = document.getElementById('enabled-' + name).checked;
   const badge = document.getElementById('status-badge-' + name);
   badge.innerHTML = enabled
-    ? '<span class="badge badge-green">&#9679; Active</span>'
-    : '<span class="badge badge-gray">&#9675; Inactive</span>';
+    ? '<span class="badge badge-green">&#9679; {t["sched_active"]}</span>'
+    : '<span class="badge badge-gray">&#9675; {t["sched_inactive"]}</span>';
 }}
 
 async function saveSched(name) {{
   const result = document.getElementById('sched-result-' + name);
-  result.textContent = 'Saving...';
+  result.textContent = MSGS.saving;
   const payload = {{}};
   payload[name] = {{
     enabled:     document.getElementById('enabled-'  + name).checked,
@@ -863,17 +1263,17 @@ async function saveSched(name) {{
     body: JSON.stringify(payload),
   }});
   const data = await res.json();
-  result.textContent = data.status === 'ok' ? '✓ Saved' : '✗ ' + data.message;
+  result.innerHTML = data.status === 'ok' ? MSGS.saved : '&#10005; ' + data.message;
   setTimeout(() => result.textContent = '', 3000);
   if (data.next_run && data.next_run[name]) {{
     const nr = document.querySelector('#card-' + name + ' .next-run');
-    if (nr) nr.innerHTML = 'Next run: <strong>' + data.next_run[name] + '</strong>';
+    if (nr) nr.innerHTML = '{t["sched_next_run"]}: <strong>' + data.next_run[name] + '</strong>';
   }}
 }}
 
 async function runNow(name) {{
   const result = document.getElementById('sched-result-' + name);
-  result.textContent = 'Starting...';
+  result.textContent = MSGS.starting;
   const res = await fetch('/run-etl', {{
     method: 'POST',
     body: (() => {{
@@ -885,22 +1285,24 @@ async function runNow(name) {{
     }})(),
   }});
   const data = await res.json();
-  result.textContent = data.status === 'started' ? '✓ Started' : '✗ ' + data.message;
+  result.innerHTML = data.status === 'started' ? MSGS.started : '&#10005; ' + data.message;
   setTimeout(() => result.textContent = '', 4000);
 }}
 </script>"""
-    return page(body, "setup")
+    return page(body, "setup", lang)
 
 
 # -- Routes -------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
-async def home():
-    return HTMLResponse(render_dashboard(get_db_stats(), get_recent_runs()))
+async def home(request: Request):
+    lang = get_lang(request)
+    return HTMLResponse(render_dashboard(get_db_stats(), get_recent_runs(), lang))
 
 
 @app.get("/setup", response_class=HTMLResponse)
-async def setup_page(oauth: str = ""):
-    return HTMLResponse(render_setup(oauth_success=(oauth == "success")))
+async def setup_page(request: Request, oauth: str = ""):
+    lang = get_lang(request)
+    return HTMLResponse(render_setup(oauth_success=(oauth == "success"), lang=lang))
 
 
 @app.post("/api/setup/oauth-credentials")
@@ -910,7 +1312,7 @@ async def save_oauth_credentials(store_url: str = Form(...), client_id: str = Fo
         "SHOPIFY_CLIENT_ID": client_id.strip(),
         "SHOPIFY_CLIENT_SECRET": client_secret.strip(),
     })
-    return JSONResponse({"status": "ok", "message": "Credenciais OAuth salvas."})
+    return JSONResponse({"status": "ok", "message": "OK"})
 
 
 @app.get("/shopify/install")
@@ -919,7 +1321,7 @@ async def shopify_install(request: Request):
     client_id = env.get("SHOPIFY_CLIENT_ID", "").strip()
     shop = env.get("SHOPIFY_STORE_URL", "").strip().replace("https://", "").rstrip("/")
     if not client_id or not shop:
-        return JSONResponse({"status": "error", "message": "SHOPIFY_CLIENT_ID e SHOPIFY_STORE_URL são necessários."}, status_code=400)
+        return JSONResponse({"status": "error", "message": "SHOPIFY_CLIENT_ID and SHOPIFY_STORE_URL required."}, status_code=400)
 
     state = secrets.token_hex(16)
     _oauth_states[state] = time.time()
@@ -944,7 +1346,7 @@ async def shopify_callback(request: Request, code: str = "", hmac: str = "", sho
         del _oauth_states[k]
 
     if state not in _oauth_states:
-        return JSONResponse({"status": "error", "message": "State inválido ou expirado."}, status_code=400)
+        return JSONResponse({"status": "error", "message": "Invalid or expired state."}, status_code=400)
     del _oauth_states[state]
 
     client_secret = read_env().get("SHOPIFY_CLIENT_SECRET", "").strip()
@@ -952,7 +1354,7 @@ async def shopify_callback(request: Request, code: str = "", hmac: str = "", sho
     message = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
     digest = hmac_lib.new(client_secret.encode(), message.encode(), hashlib.sha256).hexdigest()
     if not hmac_lib.compare_digest(digest, hmac):
-        return JSONResponse({"status": "error", "message": "Verificação HMAC falhou."}, status_code=400)
+        return JSONResponse({"status": "error", "message": "HMAC verification failed."}, status_code=400)
 
     import requests as req
     r = req.post(
@@ -965,11 +1367,11 @@ async def shopify_callback(request: Request, code: str = "", hmac: str = "", sho
         timeout=10,
     )
     if r.status_code != 200:
-        return JSONResponse({"status": "error", "message": f"Troca de token falhou: HTTP {r.status_code}"}, status_code=400)
+        return JSONResponse({"status": "error", "message": f"Token exchange failed: HTTP {r.status_code}"}, status_code=400)
 
     access_token = r.json().get("access_token", "")
     if not access_token:
-        return JSONResponse({"status": "error", "message": "Nenhum access_token na resposta."}, status_code=400)
+        return JSONResponse({"status": "error", "message": "No access_token in response."}, status_code=400)
 
     write_env({
         "SHOPIFY_ACCESS_TOKEN": access_token,
@@ -984,13 +1386,60 @@ async def run_etl(script: str = Form(...), start_date: str = Form(...), end_date
     if not script_path.exists():
         return JSONResponse({"status": "error", "message": f"Script {script} not found"})
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, str(script_path), "--start-date", start_date, "--end-date", end_date],
             cwd=str(ROOT),
         )
-        return JSONResponse({"status": "started", "message": f"{script} started for {start_date} -> {end_date}"})
+        _running_procs[proc.pid] = proc
+        return JSONResponse({"status": "started", "message": f"{script} → {start_date} / {end_date} (PID {proc.pid})"})
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)})
+
+
+@app.post("/run-order")
+async def run_order(order_id: str = Form(...)):
+    script_path = SCRIPTS_DIR / "etl_orders.py"
+    order_id = order_id.strip()
+    if not order_id:
+        return JSONResponse({"status": "error", "message": "Order ID required."})
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(script_path), "--order-id", order_id],
+            cwd=str(ROOT),
+        )
+        _running_procs[proc.pid] = proc
+        return JSONResponse({"status": "started", "message": f"Order {order_id} (PID {proc.pid})"})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)})
+
+
+@app.post("/api/runs/cancel")
+async def cancel_run(pid: int = Form(...)):
+    proc = _running_procs.pop(pid, None)
+    try:
+        if proc:
+            proc.kill()
+        else:
+            import signal
+            import os as _os
+            _os.kill(pid, signal.SIGTERM)
+        return JSONResponse({"status": "ok", "message": f"PID {pid} cancelled."})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)})
+
+
+@app.post("/api/scheduler/pause")
+async def pause_scheduler():
+    if HAS_SCHEDULER and _scheduler.running:
+        _scheduler.pause()
+    return JSONResponse({"status": "ok"})
+
+
+@app.post("/api/scheduler/resume")
+async def resume_scheduler():
+    if HAS_SCHEDULER and _scheduler.running:
+        _scheduler.resume()
+    return JSONResponse({"status": "ok"})
 
 
 # -- Setup API ----------------------------------------------------------------
@@ -1005,7 +1454,8 @@ async def save_shopify(
         "SHOPIFY_ACCESS_TOKEN": shopify_access_token.strip(),
         "SHOPIFY_API_VERSION": shopify_api_version.strip(),
     })
-    return JSONResponse({"status": "ok", "message": "Shopify config saved. Restart the server to apply to ETL scripts."})
+    log_config_change(["SHOPIFY_STORE_URL", "SHOPIFY_ACCESS_TOKEN", "SHOPIFY_API_VERSION"])
+    return JSONResponse({"status": "ok", "message": "Shopify config saved."})
 
 
 @app.post("/api/setup/sql")
@@ -1025,7 +1475,8 @@ async def save_sql(
     if sql_server_password:
         updates["SQL_SERVER_PASSWORD"] = sql_server_password
     write_env(updates)
-    return JSONResponse({"status": "ok", "message": "SQL Server config saved. Restart the server to apply to ETL scripts."})
+    log_config_change(list(updates.keys()))
+    return JSONResponse({"status": "ok", "message": "SQL Server config saved."})
 
 
 @app.get("/api/setup/test-shopify")
@@ -1040,8 +1491,8 @@ async def test_shopify(url: str = "", token: str = "", version: str = "2024-01")
         r = req.get(endpoint, headers={"X-Shopify-Access-Token": token}, timeout=10)
         if r.status_code == 200:
             shop_name = r.json().get("shop", {}).get("name", url)
-            return JSONResponse({"status": "ok", "message": f"Connected to '{shop_name}' successfully."})
-        return JSONResponse({"status": "error", "message": f"HTTP {r.status_code} — check your URL and token."})
+            return JSONResponse({"status": "ok", "message": f"Connected to '{shop_name}'."})
+        return JSONResponse({"status": "error", "message": f"HTTP {r.status_code} — check URL and token."})
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)[:120]})
 
@@ -1114,8 +1565,48 @@ async def api_stats():
 
 
 @app.get("/api/runs")
-async def api_runs():
-    return get_recent_runs()
+async def api_runs(script: str = "", status: str = ""):
+    return get_recent_runs(script_filter=script, status_filter=status)
+
+
+@app.get("/api/stats/chart")
+async def api_chart():
+    try:
+        from loaders.sqlserver_loader import get_connection
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT CONVERT(VARCHAR(10), started_at, 120), script_name, SUM(records_processed)
+            FROM etl_run_log
+            WHERE status = 'success' AND started_at >= DATEADD(day, -30, GETDATE())
+            GROUP BY CONVERT(VARCHAR(10), started_at, 120), script_name
+            ORDER BY 1
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        dates = sorted({r[0] for r in rows})
+        scripts = sorted({r[1] for r in rows if r[1]})
+        color_map = {
+            "etl_orders":       "rgba(26,26,26,0.8)",
+            "etl_fulfillments": "rgba(100,149,237,0.8)",
+            "etl_locations":    "rgba(60,179,113,0.8)",
+        }
+        datasets = []
+        for sc in scripts:
+            lookup = {r[0]: r[2] for r in rows if r[1] == sc}
+            datasets.append({
+                "label": sc,
+                "data": [lookup.get(d, 0) for d in dates],
+                "backgroundColor": color_map.get(sc, "rgba(150,150,150,0.7)"),
+            })
+        return JSONResponse({"labels": dates, "datasets": datasets})
+    except Exception:
+        return JSONResponse({"labels": [], "datasets": []})
+
+
+@app.get("/api/config-changes")
+async def api_config_changes():
+    return JSONResponse(get_config_changes())
 
 
 @app.get("/api/logs")
