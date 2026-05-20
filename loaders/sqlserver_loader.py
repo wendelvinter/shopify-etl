@@ -1,3 +1,4 @@
+import struct
 import pyodbc
 import logging
 from config.constants import (
@@ -11,16 +12,23 @@ from config.constants import (
 logger = logging.getLogger(__name__)
 
 
+def _handle_datetimeoffset(raw):
+    tup = struct.unpack("<6hI2h", raw)
+    return "{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(*tup[:6])
+
+
 def get_connection():
-    """Retorna conexão com o SQL Server."""
     conn_str = (
         f"DRIVER={{ODBC Driver 17 for SQL Server}};"
         f"SERVER={SQL_SERVER_HOST},{SQL_SERVER_PORT};"
         f"DATABASE={SQL_SERVER_DATABASE};"
         f"UID={SQL_SERVER_USER};"
         f"PWD={SQL_SERVER_PASSWORD};"
+        f"TrustServerCertificate=yes;"
     )
-    return pyodbc.connect(conn_str)
+    conn = pyodbc.connect(conn_str)
+    conn.add_output_converter(-155, _handle_datetimeoffset)
+    return conn
 
 
 class SQLServerLoader:
@@ -42,8 +50,8 @@ class SQLServerLoader:
         """Upsert de pedidos na tabela shopify_orders."""
         sql = """
         MERGE shopify_orders AS target
-        USING (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)) AS source
-            (order_id, order_number, email, financial_status,
+        USING (VALUES (?, ?, ?, ?, ?, ?, ?, ?)) AS source
+            (order_id, order_number, financial_status,
              fulfillment_status, created_at, updated_at, total_price, currency)
         ON target.order_id = source.order_id
         WHEN MATCHED THEN UPDATE SET
@@ -52,10 +60,10 @@ class SQLServerLoader:
             updated_at         = source.updated_at,
             total_price        = source.total_price
         WHEN NOT MATCHED THEN INSERT
-            (order_id, order_number, email, financial_status,
+            (order_id, order_number, financial_status,
              fulfillment_status, created_at, updated_at, total_price, currency)
         VALUES
-            (source.order_id, source.order_number, source.email,
+            (source.order_id, source.order_number,
              source.financial_status, source.fulfillment_status,
              source.created_at, source.updated_at, source.total_price,
              source.currency);
@@ -64,7 +72,6 @@ class SQLServerLoader:
             (
                 o.get("id"),
                 o.get("order_number"),
-                o.get("email"),
                 o.get("financial_status"),
                 o.get("fulfillment_status"),
                 o.get("created_at"),

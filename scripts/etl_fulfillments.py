@@ -9,8 +9,9 @@ import logging
 import sys
 from argparse import ArgumentParser
 from datetime import datetime, timedelta
+from pathlib import Path
 
-sys.path.append("..")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from extractors.shopify_api_extractor import ShopifyAPIExtractor
 from loaders.sqlserver_loader import SQLServerLoader
 from utils.logger import setup_logger
@@ -45,8 +46,8 @@ def run(start_date: str, end_date: str):
                         loader.upsert_fulfillment_events(events)
                         total_events += len(events)
 
-        loader.close()
         log_run(loader, "etl_fulfillments", start_date, end_date, "success", total_fulfillments)
+        loader.close()
         logger.info(f"etl_fulfillments finished — {total_fulfillments} fulfillments, {total_events} events")
 
     except Exception as e:

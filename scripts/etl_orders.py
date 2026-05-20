@@ -7,8 +7,9 @@ import logging
 import sys
 from argparse import ArgumentParser
 from datetime import datetime, timedelta
+from pathlib import Path
 
-sys.path.append("..")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config.constants import TABLE_ORDERS
 from extractors.shopify_api_extractor import ShopifyAPIExtractor
 from loaders.sqlserver_loader import SQLServerLoader
@@ -29,8 +30,8 @@ def run(start_date: str, end_date: str):
         orders = extractor.get_orders(start_date, end_date)
         loader.upsert_orders(orders)
         total = len(orders)
-        loader.close()
         log_run(loader, "etl_orders", start_date, end_date, "success", total)
+        loader.close()
         logger.info(f"etl_orders finished — {total} records")
     except Exception as e:
         log_run(loader, "etl_orders", start_date, end_date, "error", total, str(e))

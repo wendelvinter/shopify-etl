@@ -11,7 +11,6 @@ IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='shopify_orders' AND xtype='U
 CREATE TABLE shopify_orders (
     order_id            BIGINT          NOT NULL PRIMARY KEY,
     order_number        INT,
-    email               NVARCHAR(255),
     financial_status    NVARCHAR(50),
     fulfillment_status  NVARCHAR(50),
     created_at          DATETIMEOFFSET,

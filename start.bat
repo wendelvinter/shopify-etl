@@ -1,0 +1,3 @@
+@echo off
+echo Iniciando Shopify ETL...
+venv\Scripts\python.exe -m uvicorn ui.main:app --host 0.0.0.0 --port 8000 --reload

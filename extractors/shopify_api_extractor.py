@@ -63,12 +63,12 @@ class ShopifyAPIExtractor:
     # ------------------------------------------------------------------ #
 
     def get_orders(self, start_date: str, end_date: str) -> list:
-        """Extrai pedidos criados no intervalo de datas."""
+        """Extrai pedidos atualizados no intervalo de datas."""
         logger.info(f"Extracting orders from {start_date} to {end_date}")
         return self._get("orders", {
             "status": "any",
-            "created_at_min": f"{start_date}T00:00:00",
-            "created_at_max": f"{end_date}T23:59:59",
+            "updated_at_min": f"{start_date}T00:00:00",
+            "updated_at_max": f"{end_date}T23:59:59",
         })
 
     def get_fulfillments(self, order_id: int) -> list:
