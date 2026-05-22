@@ -13,7 +13,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config.constants import TABLE_ORDERS
 from extractors.shopify_api_extractor import ShopifyAPIExtractor
 from loaders.sqlserver_loader import SQLServerLoader
 from utils.logger import setup_logger
@@ -29,20 +28,31 @@ def run(start_date: str, end_date: str, order_id: str = None):
     extractor = ShopifyAPIExtractor()
     loader = SQLServerLoader()
     total = inserts = updates = 0
+    log_start = order_id if order_id else start_date
+    log_end = order_id if order_id else end_date
+    status = "error"
 
     try:
-        orders = extractor.get_order_by_id(order_id) if order_id else extractor.get_orders(start_date, end_date)
+        if order_id:
+            orders = extractor.get_order_by_id(order_id)
+        else:
+            orders = extractor.get_orders(start_date, end_date)
         inserts, updates = loader.upsert_orders(orders)
         total = len(orders)
-        log_run(loader, "etl_orders", start_date, end_date, "success", total,
-                inserts=inserts, updates=updates, pid=os.getpid())
-        loader.close()
+        loader.commit()
+        status = "success"
         logger.info(f"etl_orders finished — {total} records ({inserts} ins, {updates} upd)")
     except Exception as e:
-        log_run(loader, "etl_orders", start_date, end_date, "error", total, str(e),
-                inserts=inserts, updates=updates, pid=os.getpid())
+        loader.rollback()
         logger.error(f"etl_orders failed: {e}")
+        log_run(loader, "etl_orders", log_start, log_end, "error", total, str(e),
+                inserts=inserts, updates=updates, pid=os.getpid())
         raise
+    else:
+        log_run(loader, "etl_orders", log_start, log_end, status, total,
+                inserts=inserts, updates=updates, pid=os.getpid())
+    finally:
+        loader.close(commit=False)
 
 
 if __name__ == "__main__":

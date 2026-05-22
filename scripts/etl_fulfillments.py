@@ -26,37 +26,50 @@ def run(start_date: str, end_date: str):
     extractor = ShopifyAPIExtractor()
     loader = SQLServerLoader()
     total_f = ins_f = upd_f = total_e = 0
+    status = "error"
 
     try:
         orders = extractor.get_orders(start_date, end_date)
         logger.info(f"{len(orders)} orders found — fetching fulfillments...")
 
-        # Garante que as orders existam no banco antes de inserir fulfillments (FK)
         if orders:
-            loader.upsert_orders(orders)
+            loader.upsert_orders(orders, include_embedded_fulfillments=False)
+            loader.commit()
 
         for order in orders:
-            order_id = order["id"]
+            order_id = order.get("id")
+            if not order_id:
+                logger.warning("Order sem id — ignorando")
+                continue
             fulfillments = extractor.get_fulfillments(order_id)
             if fulfillments:
                 i, u = loader.upsert_fulfillments(fulfillments)
-                ins_f += i; upd_f += u; total_f += len(fulfillments)
+                ins_f += i
+                upd_f += u
+                total_f += len(fulfillments)
                 for f in fulfillments:
                     events = extractor.get_fulfillment_events(order_id, f["id"])
                     if events:
                         loader.upsert_fulfillment_events(events)
                         total_e += len(events)
+            loader.commit()
 
-        log_run(loader, "etl_fulfillments", start_date, end_date, "success", total_f,
-                inserts=ins_f, updates=upd_f, pid=os.getpid())
-        loader.close()
-        logger.info(f"etl_fulfillments finished — {total_f} fulfillments ({ins_f} ins, {upd_f} upd), {total_e} events")
-
+        status = "success"
+        logger.info(
+            f"etl_fulfillments finished — {total_f} fulfillments "
+            f"({ins_f} ins, {upd_f} upd), {total_e} events"
+        )
     except Exception as e:
+        loader.rollback()
+        logger.error(f"etl_fulfillments failed: {e}")
         log_run(loader, "etl_fulfillments", start_date, end_date, "error", total_f, str(e),
                 inserts=ins_f, updates=upd_f, pid=os.getpid())
-        logger.error(f"etl_fulfillments failed: {e}")
         raise
+    else:
+        log_run(loader, "etl_fulfillments", start_date, end_date, status, total_f,
+                inserts=ins_f, updates=upd_f, pid=os.getpid())
+    finally:
+        loader.close(commit=False)
 
 
 if __name__ == "__main__":

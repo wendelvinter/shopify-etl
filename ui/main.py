@@ -3,16 +3,21 @@ Interface de controle do ETL — Shopify -> SQL Server
 Dashboard: http://localhost:8000
 Setup:     http://localhost:8000/setup
 """
+import html
+import logging
+import os
 import subprocess
 import sys
 import json
 import hashlib
 import hmac as hmac_lib
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -23,6 +28,11 @@ ROOT = Path(__file__).parent.parent
 ENV_FILE = ROOT / ".env"
 SCHEDULES_FILE = ROOT / "config" / "schedules.json"
 SCRIPTS_DIR = ROOT / "scripts"
+
+ALLOWED_ETL_SCRIPTS = frozenset({"etl_orders", "etl_fulfillments", "etl_locations"})
+_schedule_lock = threading.Lock()
+_etl_lock = threading.Lock()
+_ui_logger = logging.getLogger(__name__)
 
 # -- Scheduler ----------------------------------------------------------------
 try:
@@ -77,8 +87,8 @@ def load_schedules() -> dict:
             for key, defaults in base.items():
                 if key in saved:
                     defaults.update(saved[key])
-        except Exception:
-            pass
+        except Exception as e:
+            _ui_logger.warning("Não foi possível ler schedules.json: %s", e)
     return base
 
 
@@ -94,17 +104,96 @@ def _date_range_for(cfg: dict) -> tuple:
     return (today - timedelta(days=1)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
 
 
-def _run_job(script_name: str, cfg: dict):
-    start, end = _date_range_for(cfg)
-    script_path = SCRIPTS_DIR / f"{script_name}.py"
-    subprocess.Popen(
-        [sys.executable, str(script_path), "--start-date", start, "--end-date", end],
-        cwd=str(ROOT),
+def _escape_html(value) -> str:
+    return html.escape(str(value) if value is not None else "", quote=True)
+
+
+def _label_with_configured(label: str, configured: bool, hint_text: str) -> str:
+    """Badge no label (não após o input) para não quebrar o layout da row."""
+    if not configured:
+        return label
+    return (
+        f'{label} <span class="badge badge-green configured-badge">'
+        f'{_escape_html(hint_text)}</span>'
     )
 
 
+def _env_quote(value: str) -> str:
+    s = "" if value is None else str(value)
+    if any(c in s for c in ' \t\n\r#="\\\''):
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return s
+
+
+def _parse_time_hm(time_str: str) -> tuple:
+    parts = (time_str or "06:00").strip().split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Horário inválido: {time_str}")
+    h, m = int(parts[0]), int(parts[1])
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError(f"Horário fora do intervalo: {time_str}")
+    return h, m
+
+
+def _validate_shopify_store_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in ("https", "http"):
+        raise ValueError("URL da loja deve usar http ou https")
+    host = (parsed.hostname or "").lower()
+    if not host.endswith(".myshopify.com"):
+        raise ValueError("URL deve ser de um domínio *.myshopify.com")
+    return f"https://{host}"
+
+
+def _normalize_shop_domain(shop: str) -> str:
+    return shop.strip().lower().replace("https://", "").split("/")[0]
+
+
+def _resolve_script(script_name: str) -> Path:
+    if script_name not in ALLOWED_ETL_SCRIPTS:
+        raise ValueError(f"Script não permitido: {script_name}")
+    path = (SCRIPTS_DIR / f"{script_name}.py").resolve()
+    if not path.is_file() or SCRIPTS_DIR.resolve() not in path.parents:
+        raise ValueError(f"Script inválido: {script_name}")
+    return path
+
+
+def _reap_running_procs():
+    for pid, proc in list(_running_procs.items()):
+        if proc.poll() is not None:
+            _running_procs.pop(pid, None)
+
+
+def _spawn_etl(cmd: list) -> subprocess.Popen:
+    with _etl_lock:
+        _reap_running_procs()
+        if _running_procs:
+            raise RuntimeError(
+                "Já existe um ETL em execução. Aguarde terminar ou cancele o run atual."
+            )
+        proc = subprocess.Popen(cmd, cwd=str(ROOT))
+        _running_procs[proc.pid] = proc
+        return proc
+
+
+def _run_job(script_name: str, cfg: dict):
+    if script_name not in ALLOWED_ETL_SCRIPTS:
+        _ui_logger.warning("Job ignorado — script não permitido: %s", script_name)
+        return
+    start, end = _date_range_for(cfg)
+    try:
+        script_path = _resolve_script(script_name)
+        _spawn_etl(
+            [sys.executable, str(script_path), "--start-date", start, "--end-date", end],
+        )
+    except RuntimeError as e:
+        _ui_logger.warning("Scheduler não iniciou ETL: %s", e)
+    except Exception as e:
+        _ui_logger.error("Scheduler falhou ao iniciar %s: %s", script_name, e)
+
+
 def _make_trigger(cfg: dict):
-    h, m = cfg.get("time", "06:00").split(":")
+    h, m = _parse_time_hm(cfg.get("time", "06:00"))
     freq = cfg.get("frequency", "daily")
     n = max(1, int(cfg.get("every_n", 15)))
     if freq == "every_n_minutes":
@@ -126,17 +215,33 @@ def _make_trigger(cfg: dict):
 def apply_schedules(schedules: dict):
     if not HAS_SCHEDULER:
         return
-    _scheduler.remove_all_jobs()
-    for name, cfg in schedules.items():
-        if cfg.get("enabled"):
-            _scheduler.add_job(
-                _run_job, _make_trigger(cfg), args=[name, cfg],
-                id=name, replace_existing=True
-            )
+    with _schedule_lock:
+        _scheduler.remove_all_jobs()
+        for name, cfg in schedules.items():
+            if name not in ALLOWED_ETL_SCRIPTS:
+                continue
+            if cfg.get("enabled"):
+                try:
+                    _scheduler.add_job(
+                        _run_job, _make_trigger(cfg), args=[name, cfg],
+                        id=name, replace_existing=True,
+                    )
+                except ValueError as e:
+                    _ui_logger.error("Agendamento inválido para %s: %s", name, e)
 
 
 @asynccontextmanager
 async def lifespan(_):
+    import logging
+    from utils.logger import setup_logger
+    from utils.db_migrations import ensure_migrations
+
+    setup_logger()
+    mig = ensure_migrations()
+    if mig.get("applied"):
+        logging.getLogger(__name__).info(
+            "Migrations aplicadas na inicialização: %s", ", ".join(mig["applied"])
+        )
     if HAS_SCHEDULER:
         apply_schedules(load_schedules())
         _scheduler.start()
@@ -200,6 +305,9 @@ TRANSLATIONS = {
         "confirm_cancel": "Cancel this run?", "type_order_id": "Enter an Order ID.",
         "oauth_required": "Store URL, Client ID and Client Secret are required.",
         "oauth_success_msg": "App authorized successfully. Access token saved to .env.",
+        "token_configured": "Token configured",
+        "secret_configured": "Secret configured",
+        "password_configured": "Password configured",
         "apscheduler_active": "APScheduler active",
         "apscheduler_missing": "APScheduler not installed",
         "dow_mon": "Monday", "dow_tue": "Tuesday", "dow_wed": "Wednesday",
@@ -251,6 +359,9 @@ TRANSLATIONS = {
         "confirm_cancel": "Cancelar este run?", "type_order_id": "Digite um Order ID.",
         "oauth_required": "URL da loja, Client ID e Client Secret são obrigatórios.",
         "oauth_success_msg": "App autorizado com sucesso. Access token salvo no .env.",
+        "token_configured": "Token configurado",
+        "secret_configured": "Secret configurado",
+        "password_configured": "Senha configurada",
         "apscheduler_active": "APScheduler ativo",
         "apscheduler_missing": "APScheduler não instalado",
         "dow_mon": "Segunda", "dow_tue": "Terça", "dow_wed": "Quarta",
@@ -269,8 +380,8 @@ def log_config_change(changed_keys: list):
     if CONFIG_CHANGES_FILE.exists():
         try:
             changes = json.loads(CONFIG_CHANGES_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except Exception as e:
+            _ui_logger.warning("Não foi possível ler config_changes.json: %s", e)
     changes.insert(0, entry)
     CONFIG_CHANGES_FILE.write_text(json.dumps(changes[:200], indent=2), encoding="utf-8")
 
@@ -305,7 +416,7 @@ def write_env(updates: dict):
             if s and not s.startswith("#") and "=" in s:
                 k = s.split("=", 1)[0].strip()
                 if k in updates:
-                    lines.append(f"{k}={updates[k]}")
+                    lines.append(f"{k}={_env_quote(updates[k])}")
                     written.add(k)
                 else:
                     lines.append(line)
@@ -313,8 +424,10 @@ def write_env(updates: dict):
                 lines.append(line)
     for k, v in updates.items():
         if k not in written:
-            lines.append(f"{k}={v}")
+            lines.append(f"{k}={_env_quote(v)}")
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    from config.constants import reload_config
+    reload_config()
 
 
 # -- DB helpers ---------------------------------------------------------------
@@ -340,6 +453,7 @@ def get_db_stats():
 
 def get_recent_runs(limit=20, script_filter="", status_filter=""):
     runs = []
+    limit = max(1, min(int(limit), 100))
     try:
         from loaders.sqlserver_loader import get_connection
         conn = get_connection()
@@ -347,9 +461,13 @@ def get_recent_runs(limit=20, script_filter="", status_filter=""):
         where_parts = []
         params = []
         if script_filter:
+            if script_filter not in ALLOWED_ETL_SCRIPTS:
+                return runs
             where_parts.append("script_name = ?")
             params.append(script_filter)
         if status_filter:
+            if status_filter not in ("success", "error"):
+                return runs
             where_parts.append("status = ?")
             params.append(status_filter)
         where = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
@@ -420,6 +538,7 @@ nav a.active { background: #444; color: white; font-weight: 500; }
 .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
 .field { flex: 1; min-width: 160px; }
 .field label { display: block; font-size: 12px; font-weight: 500; color: #555; margin-bottom: 6px; }
+.configured-badge { margin-left: 6px; font-weight: 500; vertical-align: middle; text-transform: none; letter-spacing: 0; }
 input[type=text], input[type=password], input[type=time], input[type=number], select {
   width: 100%; padding: 9px 12px; border: 1px solid #ddd; border-radius: 6px;
   font-size: 14px; background: white; color: #1a1a1a; }
@@ -542,7 +661,11 @@ def render_dashboard(stats, runs, lang: str = "pt"):
 
     def _run_row(r):
         sc = r['status']
-        err_short = str(r['error'])[:80] + ("…" if len(str(r['error'])) > 80 else "")
+        err_full = _escape_html(r.get("error") or "")
+        err_short = (r.get("error") or "")[:80]
+        if len(r.get("error") or "") > 80:
+            err_short += "…"
+        err_short = _escape_html(err_short)
         cancel_btn = (
             f'<button class="btn btn-outline btn-sm" style="color:#c00;border-color:#f8d7da;" '
             f'onclick="cancelRun({r["pid"]})">&#9632;</button>'
@@ -551,15 +674,15 @@ def render_dashboard(stats, runs, lang: str = "pt"):
         ins_upd = f'{r["inserts"]:,} / {r["updates"]:,}' if (r.get("inserts") or r.get("updates")) else "—"
         return f"""
     <tr>
-      <td>{r['script']}</td><td>{r['start']}</td><td>{r['end']}</td>
-      <td><span class="status-{'success' if sc=='success' else 'error'}">{sc}</span></td>
+      <td>{_escape_html(r['script'])}</td><td>{_escape_html(r['start'])}</td><td>{_escape_html(r['end'])}</td>
+      <td><span class="status-{'success' if sc=='success' else 'error'}">{_escape_html(sc)}</span></td>
       <td style="font-size:12px;">{int(r['records']):,}</td>
       <td style="font-size:12px;color:#888;">{ins_upd}</td>
-      <td style="font-size:12px;color:#888;">{r['duration']}</td>
-      <td style="font-size:12px;">{r['finished_at']}</td>
+      <td style="font-size:12px;color:#888;">{_escape_html(r['duration'])}</td>
+      <td style="font-size:12px;">{_escape_html(r['finished_at'])}</td>
       <td style="color:#aaa;font-size:11px;cursor:pointer;max-width:200px;"
-          title="{t['modal_error_title']}" onclick="showError(this)"
-          data-full="{str(r['error']).replace(chr(34), '&quot;')}">{err_short}</td>
+          title="{_escape_html(t['modal_error_title'])}" onclick="showError(this)"
+          data-full="{err_full}">{err_short}</td>
       <td>{cancel_btn}</td>
     </tr>"""
 
@@ -713,6 +836,11 @@ def render_dashboard(stats, runs, lang: str = "pt"):
 
   let volumeChart = null;
 
+  function escHtml(s) {{
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }}
+
   function showError(el) {{
     const full = el.getAttribute('data-full');
     if (!full) return;
@@ -788,20 +916,21 @@ def render_dashboard(stats, runs, lang: str = "pt"):
     const res = await fetch('/api/runs?' + params);
     const runs = await res.json();
     document.querySelector('#runs-table tbody').innerHTML = runs.map(r => {{
-      const errShort = (r.error||'').length > 80 ? (r.error||'').slice(0,80)+'…' : (r.error||'');
+      const errRaw = r.error || '';
+      const errShort = errRaw.length > 80 ? errRaw.slice(0, 80) + '…' : errRaw;
       const insUpd = (r.inserts||r.updates) ? `${{r.inserts||0}}/${{r.updates||0}}` : '—';
       const cancelBtn = (r.pid && r.finished_at === '—')
         ? `<button class="btn btn-outline btn-sm" style="color:#c00;border-color:#f8d7da;" onclick="cancelRun(${{r.pid}})">&#9632;</button>` : '';
       return `<tr>
-        <td>${{r.script}}</td><td>${{r.start}}</td><td>${{r.end}}</td>
-        <td><span class="status-${{r.status==='success'?'success':'error'}}">${{r.status}}</span></td>
+        <td>${{escHtml(r.script)}}</td><td>${{escHtml(r.start)}}</td><td>${{escHtml(r.end)}}</td>
+        <td><span class="status-${{r.status==='success'?'success':'error'}}">${{escHtml(r.status)}}</span></td>
         <td style="font-size:12px;">${{Number(r.records||0).toLocaleString()}}</td>
         <td style="font-size:12px;color:#888;">${{insUpd}}</td>
-        <td style="font-size:12px;color:#888;">${{r.duration||'—'}}</td>
-        <td style="font-size:12px;">${{r.finished_at}}</td>
+        <td style="font-size:12px;color:#888;">${{escHtml(r.duration||'—')}}</td>
+        <td style="font-size:12px;">${{escHtml(r.finished_at)}}</td>
         <td style="color:#aaa;font-size:11px;cursor:pointer;max-width:200px;"
-            title="${{MSGS.modal_error_title}}" onclick="showError(this)"
-            data-full="${{(r.error||'').replace(/"/g,'&quot;')}}">${{errShort}}</td>
+            title="${{escHtml(MSGS.modal_error_title)}}" onclick="showError(this)"
+            data-full="${{escHtml(errRaw)}}">${{escHtml(errShort)}}</td>
         <td>${{cancelBtn}}</td>
       </tr>`;
     }}).join('');
@@ -969,15 +1098,28 @@ def render_setup(oauth_success: bool = False, lang: str = "pt") -> str:
     else:
         next_runs = {k: "—" for k in schedules}
 
-    shopify_url = env.get("SHOPIFY_STORE_URL", "")
-    shopify_token = env.get("SHOPIFY_ACCESS_TOKEN", "")
-    shopify_version = env.get("SHOPIFY_API_VERSION", "2024-01")
-    client_id = env.get("SHOPIFY_CLIENT_ID", "")
-    client_secret = env.get("SHOPIFY_CLIENT_SECRET", "")
-    sql_host = env.get("SQL_SERVER_HOST", "")
-    sql_port = env.get("SQL_SERVER_PORT", "1433")
-    sql_db = env.get("SQL_SERVER_DATABASE", "")
-    sql_user = env.get("SQL_SERVER_USER", "")
+    shopify_url = _escape_html(env.get("SHOPIFY_STORE_URL", ""))
+    has_shopify_token = bool(env.get("SHOPIFY_ACCESS_TOKEN"))
+    has_client_secret = bool(env.get("SHOPIFY_CLIENT_SECRET"))
+    has_sql_password = bool(env.get("SQL_SERVER_PASSWORD"))
+    shopify_version = _escape_html(env.get("SHOPIFY_API_VERSION", "2024-01"))
+    client_id = _escape_html(env.get("SHOPIFY_CLIENT_ID", ""))
+    sql_host = _escape_html(env.get("SQL_SERVER_HOST", ""))
+    sql_port = _escape_html(env.get("SQL_SERVER_PORT", "1433"))
+    sql_db = _escape_html(env.get("SQL_SERVER_DATABASE", ""))
+    sql_user = _escape_html(env.get("SQL_SERVER_USER", ""))
+    token_ph = "shpat_..." if not has_shopify_token else "••••••••"
+    secret_ph = "shpss_..." if not has_client_secret else "••••••••"
+    sql_pass_ph = "••••••••"
+    lbl_access_token = _label_with_configured(
+        t["label_access_token"], has_shopify_token, t["token_configured"],
+    )
+    lbl_client_secret = _label_with_configured(
+        t["label_client_secret"], has_client_secret, t["secret_configured"],
+    )
+    lbl_sql_password = _label_with_configured(
+        t["label_password"], has_sql_password, t["password_configured"],
+    )
 
     sched_cards = "".join(
         _sched_card(name, cfg, next_runs.get(name, "—"), t)
@@ -1022,8 +1164,8 @@ def render_setup(oauth_success: bool = False, lang: str = "pt") -> str:
         <input type="text" id="oauth-client-id" value="{client_id}" placeholder="e7fe782d...">
       </div>
       <div class="field" style="flex:2;min-width:260px;">
-        <label>{t["label_client_secret"]}</label>
-        <input type="password" id="oauth-client-secret" value="{client_secret}" placeholder="shpss_...">
+        <label>{lbl_client_secret}</label>
+        <input type="password" id="oauth-client-secret" value="" placeholder="{secret_ph}" autocomplete="new-password">
       </div>
     </div>
     <div class="row" style="margin-top:14px;">
@@ -1044,8 +1186,8 @@ def render_setup(oauth_success: bool = False, lang: str = "pt") -> str:
         <input type="text" id="shopify-url" value="{shopify_url}" placeholder="https://mystore.myshopify.com">
       </div>
       <div class="field" style="flex:2;min-width:260px;">
-        <label>{t["label_access_token"]}</label>
-        <input type="password" id="shopify-token" value="{shopify_token}" placeholder="shpat_...">
+        <label>{lbl_access_token}</label>
+        <input type="password" id="shopify-token" value="" placeholder="{token_ph}" autocomplete="new-password">
       </div>
       <div class="field" style="max-width:140px;">
         <label>{t["label_api_version"]}</label>
@@ -1085,8 +1227,8 @@ def render_setup(oauth_success: bool = False, lang: str = "pt") -> str:
         <input type="text" id="sql-user" value="{sql_user}" placeholder="sa">
       </div>
       <div class="field" style="flex:2;min-width:180px;">
-        <label>{t["label_password"]}</label>
-        <input type="password" id="sql-pass" value="" placeholder="••••••••">
+        <label>{lbl_sql_password}</label>
+        <input type="password" id="sql-pass" value="" placeholder="{sql_pass_ph}" autocomplete="new-password">
       </div>
     </div>
     <div class="row" style="margin-top:14px;">
@@ -1157,11 +1299,11 @@ async function testShopify() {{
   badge.className = 'badge badge-gray'; badge.textContent = MSGS.testing;
   const r = document.getElementById('shopify-result');
   r.className = 'result';
-  const res = await fetch('/api/setup/test-shopify?' + new URLSearchParams({{
-    url: document.getElementById('shopify-url').value,
-    token: document.getElementById('shopify-token').value,
-    version: document.getElementById('shopify-version').value,
-  }}));
+  const body = new FormData();
+  body.append('url', document.getElementById('shopify-url').value);
+  body.append('token', document.getElementById('shopify-token').value);
+  body.append('version', document.getElementById('shopify-version').value);
+  const res = await fetch('/api/setup/test-shopify', {{ method: 'POST', body }});
   const data = await res.json();
   r.className = 'result ' + (data.status === 'ok' ? 'ok' : 'error');
   r.textContent = data.message;
@@ -1188,13 +1330,13 @@ async function testSQL() {{
   badge.className = 'badge badge-gray'; badge.textContent = MSGS.testing;
   const r = document.getElementById('sql-result');
   r.className = 'result';
-  const res = await fetch('/api/setup/test-sql?' + new URLSearchParams({{
-    host: document.getElementById('sql-host').value,
-    port: document.getElementById('sql-port').value,
-    database: document.getElementById('sql-db').value,
-    user: document.getElementById('sql-user').value,
-    password: document.getElementById('sql-pass').value,
-  }}));
+  const body = new FormData();
+  body.append('host', document.getElementById('sql-host').value);
+  body.append('port', document.getElementById('sql-port').value);
+  body.append('database', document.getElementById('sql-db').value);
+  body.append('user', document.getElementById('sql-user').value);
+  body.append('password', document.getElementById('sql-pass').value);
+  const res = await fetch('/api/setup/test-sql', {{ method: 'POST', body }});
   const data = await res.json();
   r.className = 'result ' + (data.status === 'ok' ? 'ok' : 'error');
   r.textContent = data.message;
@@ -1306,12 +1448,22 @@ async def setup_page(request: Request, oauth: str = ""):
 
 
 @app.post("/api/setup/oauth-credentials")
-async def save_oauth_credentials(store_url: str = Form(...), client_id: str = Form(...), client_secret: str = Form(...)):
-    write_env({
-        "SHOPIFY_STORE_URL": store_url.strip(),
+async def save_oauth_credentials(
+    store_url: str = Form(...),
+    client_id: str = Form(...),
+    client_secret: str = Form(""),
+):
+    try:
+        safe_url = _validate_shopify_store_url(store_url)
+    except ValueError as e:
+        return JSONResponse({"status": "error", "message": str(e)})
+    updates = {
+        "SHOPIFY_STORE_URL": safe_url,
         "SHOPIFY_CLIENT_ID": client_id.strip(),
-        "SHOPIFY_CLIENT_SECRET": client_secret.strip(),
-    })
+    }
+    if client_secret.strip():
+        updates["SHOPIFY_CLIENT_SECRET"] = client_secret.strip()
+    write_env(updates)
     return JSONResponse({"status": "ok", "message": "OK"})
 
 
@@ -1373,56 +1525,66 @@ async def shopify_callback(request: Request, code: str = "", hmac: str = "", sho
     if not access_token:
         return JSONResponse({"status": "error", "message": "No access_token in response."}, status_code=400)
 
+    configured = _normalize_shop_domain(read_env().get("SHOPIFY_STORE_URL", ""))
+    callback_shop = _normalize_shop_domain(shop)
+    if configured and configured != callback_shop:
+        return JSONResponse(
+            {"status": "error", "message": "Loja do callback não confere com SHOPIFY_STORE_URL configurada."},
+            status_code=400,
+        )
+
     write_env({
         "SHOPIFY_ACCESS_TOKEN": access_token,
-        "SHOPIFY_STORE_URL": f"https://{shop}",
+        "SHOPIFY_STORE_URL": f"https://{callback_shop}",
     })
     return RedirectResponse("/setup?oauth=success")
 
 
 @app.post("/run-etl")
 async def run_etl(script: str = Form(...), start_date: str = Form(...), end_date: str = Form(...)):
-    script_path = SCRIPTS_DIR / f"{script}.py"
-    if not script_path.exists():
-        return JSONResponse({"status": "error", "message": f"Script {script} not found"})
     try:
-        proc = subprocess.Popen(
+        script_path = _resolve_script(script.strip())
+        proc = _spawn_etl(
             [sys.executable, str(script_path), "--start-date", start_date, "--end-date", end_date],
-            cwd=str(ROOT),
         )
-        _running_procs[proc.pid] = proc
         return JSONResponse({"status": "started", "message": f"{script} → {start_date} / {end_date} (PID {proc.pid})"})
+    except ValueError as e:
+        return JSONResponse({"status": "error", "message": str(e)})
+    except RuntimeError as e:
+        return JSONResponse({"status": "error", "message": str(e)})
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)})
 
 
 @app.post("/run-order")
 async def run_order(order_id: str = Form(...)):
-    script_path = SCRIPTS_DIR / "etl_orders.py"
     order_id = order_id.strip()
-    if not order_id:
-        return JSONResponse({"status": "error", "message": "Order ID required."})
+    if not order_id or not order_id.isdigit():
+        return JSONResponse({"status": "error", "message": "Order ID inválido (apenas dígitos)."})
     try:
-        proc = subprocess.Popen(
+        script_path = _resolve_script("etl_orders")
+        proc = _spawn_etl(
             [sys.executable, str(script_path), "--order-id", order_id],
-            cwd=str(ROOT),
         )
-        _running_procs[proc.pid] = proc
         return JSONResponse({"status": "started", "message": f"Order {order_id} (PID {proc.pid})"})
+    except RuntimeError as e:
+        return JSONResponse({"status": "error", "message": str(e)})
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)})
 
 
 @app.post("/api/runs/cancel")
 async def cancel_run(pid: int = Form(...)):
-    proc = _running_procs.pop(pid, None)
+    proc = _running_procs.get(pid)
+    if not proc:
+        _reap_running_procs()
+        return JSONResponse(
+            {"status": "error", "message": f"PID {pid} não pertence a um ETL ativo deste painel."},
+            status_code=404,
+        )
     try:
-        if proc:
-            proc.kill()
-        else:
-            import signal
-            import os as _os
-            _os.kill(pid, signal.SIGTERM)
+        proc.kill()
+        _running_procs.pop(pid, None)
         return JSONResponse({"status": "ok", "message": f"PID {pid} cancelled."})
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)})
@@ -1446,15 +1608,21 @@ async def resume_scheduler():
 @app.post("/api/setup/shopify")
 async def save_shopify(
     shopify_store_url: str = Form(...),
-    shopify_access_token: str = Form(...),
+    shopify_access_token: str = Form(""),
     shopify_api_version: str = Form(...),
 ):
-    write_env({
-        "SHOPIFY_STORE_URL": shopify_store_url.strip(),
-        "SHOPIFY_ACCESS_TOKEN": shopify_access_token.strip(),
+    try:
+        store_url = _validate_shopify_store_url(shopify_store_url)
+    except ValueError as e:
+        return JSONResponse({"status": "error", "message": str(e)})
+    updates = {
+        "SHOPIFY_STORE_URL": store_url,
         "SHOPIFY_API_VERSION": shopify_api_version.strip(),
-    })
-    log_config_change(["SHOPIFY_STORE_URL", "SHOPIFY_ACCESS_TOKEN", "SHOPIFY_API_VERSION"])
+    }
+    if shopify_access_token.strip():
+        updates["SHOPIFY_ACCESS_TOKEN"] = shopify_access_token.strip()
+    write_env(updates)
+    log_config_change(list(updates.keys()))
     return JSONResponse({"status": "ok", "message": "Shopify config saved."})
 
 
@@ -1479,15 +1647,20 @@ async def save_sql(
     return JSONResponse({"status": "ok", "message": "SQL Server config saved."})
 
 
-@app.get("/api/setup/test-shopify")
-async def test_shopify(url: str = "", token: str = "", version: str = "2024-01"):
+@app.post("/api/setup/test-shopify")
+async def test_shopify(url: str = Form(""), token: str = Form(""), version: str = Form("2024-01")):
     url = url.strip()
     token = token.strip()
-    if not url or not token:
-        return JSONResponse({"status": "error", "message": "URL and token are required."})
+    if not url:
+        return JSONResponse({"status": "error", "message": "URL is required."})
+    if not token:
+        token = read_env().get("SHOPIFY_ACCESS_TOKEN", "").strip()
+    if not token:
+        return JSONResponse({"status": "error", "message": "Token is required (ou já configurado no .env)."})
     try:
         import requests as req
-        endpoint = f"{url.rstrip('/')}/admin/api/{version}/shop.json"
+        safe_url = _validate_shopify_store_url(url)
+        endpoint = f"{safe_url.rstrip('/')}/admin/api/{version.strip()}/shop.json"
         r = req.get(endpoint, headers={"X-Shopify-Access-Token": token}, timeout=10)
         if r.status_code == 200:
             shop_name = r.json().get("shop", {}).get("name", url)
@@ -1497,14 +1670,27 @@ async def test_shopify(url: str = "", token: str = "", version: str = "2024-01")
         return JSONResponse({"status": "error", "message": str(e)[:120]})
 
 
-@app.get("/api/setup/test-sql")
-async def test_sql(host: str = "", port: str = "1433", database: str = "", user: str = "", password: str = ""):
+@app.post("/api/setup/test-sql")
+async def test_sql(
+    host: str = Form(""),
+    port: str = Form("1433"),
+    database: str = Form(""),
+    user: str = Form(""),
+    password: str = Form(""),
+):
     if not host or not database:
         return JSONResponse({"status": "error", "message": "Host and database are required."})
+    for field_name, val in (("host", host), ("database", database), ("user", user), ("password", password)):
+        if ";" in str(val) or "{" in str(val) or "}" in str(val):
+            return JSONResponse(
+                {"status": "error", "message": f"Caractere inválido em {field_name}."},
+            )
+    if not password:
+        password = read_env().get("SQL_SERVER_PASSWORD", "")
     try:
         import pyodbc
         conn_str = (
-            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"DRIVER={{ODBC Driver 18 for SQL Server}};"
             f"SERVER={host},{port};DATABASE={database};"
             f"UID={user};PWD={password};TrustServerCertificate=yes;"
         )
@@ -1543,8 +1729,13 @@ async def save_schedules_api(request: Request):
 
     schedules = load_schedules()
     for script_name, cfg in data.items():
-        if script_name in schedules:
-            schedules[script_name].update(cfg)
+        if script_name not in schedules or script_name not in ALLOWED_ETL_SCRIPTS:
+            continue
+        if "every_n" in cfg:
+            cfg["every_n"] = max(1, min(int(cfg["every_n"]), 9999))
+        if "days_back" in cfg:
+            cfg["days_back"] = max(1, min(int(cfg["days_back"]), 365))
+        schedules[script_name].update(cfg)
 
     save_schedules_file(schedules)
     apply_schedules(schedules)

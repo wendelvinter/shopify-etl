@@ -11,6 +11,17 @@ from config.constants import (
 
 logger = logging.getLogger(__name__)
 
+REQUEST_TIMEOUT = 30
+MAX_RETRIES = 3
+
+
+class ShopifyAPIError(Exception):
+    """Erro na comunicação com a API Shopify."""
+
+
+class OrderNotFoundError(ShopifyAPIError):
+    """Pedido não encontrado ou resposta inválida."""
+
 
 class ShopifyAPIExtractor:
     """
@@ -26,26 +37,55 @@ class ShopifyAPIExtractor:
         }
         self.batch_size = ETL_BATCH_SIZE
 
-    def _get(self, endpoint: str, params: dict = {}) -> list:
+    def _request(self, url: str, params: Optional[dict] = None) -> requests.Response:
+        last_err = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                response = requests.get(
+                    url, headers=self.headers, params=params, timeout=REQUEST_TIMEOUT,
+                )
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", "2"))
+                    logger.warning(f"Rate limited — aguardando {retry_after}s (tentativa {attempt})")
+                    import time
+                    time.sleep(retry_after)
+                    continue
+                response.raise_for_status()
+                return response
+            except requests.RequestException as e:
+                last_err = e
+                if attempt < MAX_RETRIES:
+                    logger.warning(f"Request falhou (tentativa {attempt}): {e}")
+        raise ShopifyAPIError(str(last_err)) from last_err
+
+    def _parse_list_response(self, data: dict, endpoint: str) -> list:
+        if not data:
+            raise ShopifyAPIError(f"Resposta vazia de {endpoint}")
+        if "errors" in data:
+            raise ShopifyAPIError(f"Shopify API errors: {data['errors']}")
+        keys = [k for k in data if k != "errors"]
+        if not keys:
+            raise ShopifyAPIError(f"Resposta sem chave de lista em {endpoint}")
+        page_data = data[keys[0]]
+        if not isinstance(page_data, list):
+            raise ShopifyAPIError(f"Esperado lista em '{keys[0]}', recebido {type(page_data)}")
+        return page_data
+
+    def _get(self, endpoint: str, params: Optional[dict] = None) -> list:
         """Executa GET com paginação automática via cursor."""
         results = []
         url = f"{self.base_url}/{endpoint}.json"
+        params = dict(params or {})
         params["limit"] = self.batch_size
 
         while url:
             logger.info(f"Fetching: {url} | params: {params}")
-            response = requests.get(url, headers=self.headers, params=params)
-            response.raise_for_status()
-
-            data = response.json()
-            key = list(data.keys())[0]
-            page_data = data[key]
+            response = self._request(url, params=params)
+            page_data = self._parse_list_response(response.json(), endpoint)
             results.extend(page_data)
             logger.info(f"Fetched {len(page_data)} records (total: {len(results)})")
-
-            # Paginação via Link header
             url = self._get_next_page(response.headers.get("Link", ""))
-            params = {}  # próxima página já vem no cursor
+            params = {}
 
         return results
 
@@ -57,10 +97,6 @@ class ShopifyAPIExtractor:
             if 'rel="next"' in part:
                 return part.split(";")[0].strip().strip("<>")
         return None
-
-    # ------------------------------------------------------------------ #
-    # Métodos públicos — um por entidade                                  #
-    # ------------------------------------------------------------------ #
 
     def get_orders(self, start_date: str, end_date: str) -> list:
         """Extrai pedidos atualizados no intervalo de datas."""
@@ -87,16 +123,18 @@ class ShopifyAPIExtractor:
         return self._get("locations")
 
     def get_order_by_id(self, order_id: str) -> list:
-        """Extrai um pedido específico pelo ID."""
+        """Extrai um pedido específico pelo ID. Levanta OrderNotFoundError se ausente."""
         logger.info(f"Extracting order {order_id}")
+        url = f"{self.base_url}/orders/{order_id}.json"
         try:
-            response = requests.get(
-                f"{self.base_url}/orders/{order_id}.json",
-                headers=self.headers, timeout=10,
-            )
-            response.raise_for_status()
-            order = response.json().get("order")
-            return [order] if order else []
-        except Exception as e:
-            logger.error(f"Failed to fetch order {order_id}: {e}")
-            return []
+            response = self._request(url)
+        except ShopifyAPIError as e:
+            raise OrderNotFoundError(f"Failed to fetch order {order_id}: {e}") from e
+
+        data = response.json()
+        if data.get("errors"):
+            raise OrderNotFoundError(f"Shopify errors for order {order_id}: {data['errors']}")
+        order = data.get("order")
+        if not order:
+            raise OrderNotFoundError(f"Order {order_id} not found")
+        return [order]

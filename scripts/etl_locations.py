@@ -22,18 +22,28 @@ def run():
     logger.info("Starting etl_locations")
     extractor = ShopifyAPIExtractor()
     loader = SQLServerLoader()
+    inserts = updates = 0
+    total = 0
+    status = "error"
 
     try:
         locations = extractor.get_locations()
         inserts, updates = loader.upsert_locations(locations)
-        log_run(loader, "etl_locations", None, None, "success", len(locations),
-                inserts=inserts, updates=updates, pid=os.getpid())
-        loader.close()
-        logger.info(f"etl_locations finished — {len(locations)} locations ({inserts} ins, {updates} upd)")
+        total = len(locations)
+        loader.commit()
+        status = "success"
+        logger.info(f"etl_locations finished — {total} locations ({inserts} ins, {updates} upd)")
     except Exception as e:
-        log_run(loader, "etl_locations", None, None, "error", 0, str(e), pid=os.getpid())
+        loader.rollback()
         logger.error(f"etl_locations failed: {e}")
+        log_run(loader, "etl_locations", None, None, "error", total, str(e),
+                inserts=inserts, updates=updates, pid=os.getpid())
         raise
+    else:
+        log_run(loader, "etl_locations", None, None, status, total,
+                inserts=inserts, updates=updates, pid=os.getpid())
+    finally:
+        loader.close(commit=False)
 
 
 if __name__ == "__main__":
