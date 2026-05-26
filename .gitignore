@@ -31,3 +31,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Runtime
+config/config_changes.json
