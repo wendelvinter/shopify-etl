@@ -20,6 +20,7 @@ MIGRATIONS = [
     ("001_create_tables", "create_tables.sql", "Tabelas base do ETL"),
     ("002_migrate_v2", "migrate_v2.sql", "Campos inserts/updates/pid no etl_run_log"),
     ("003_migrate_v3", "migrate_v3.sql", "Expansão de schema (pedidos, fulfillments, novas tabelas)"),
+    ("004_migrate_v4", "migrate_v4.sql", "Tabelas de Returns (devoluções)"),
 ]
 
 _SCHEMA_TABLE_SQL = """

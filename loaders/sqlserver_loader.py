@@ -22,6 +22,8 @@ ALLOWED_TABLES = frozenset({
     "shopify_order_shipping_lines",
     "shopify_order_discount_codes",
     "shopify_fulfillment_line_items",
+    "shopify_returns",
+    "shopify_return_line_items",
 })
 
 
@@ -498,6 +500,79 @@ class SQLServerLoader:
         ins, upd = self._merge_stats(sql, rows)
         logger.info(f"Upserted {len(rows)} fulfillment events ({ins} inserts, {upd} updates)")
         return ins, upd
+
+    # ------------------------------------------------------------------ #
+    # Returns                                                              #
+    # ------------------------------------------------------------------ #
+
+    def upsert_returns(self, returns: list, order_id: int) -> tuple:
+        sql = """
+        MERGE shopify_returns AS target
+        USING (VALUES (?,?,?,?,?,?,?)) AS source
+            (return_id, order_id, status, name, decline_reason, created_at, updated_at)
+        ON target.return_id = source.return_id
+        WHEN MATCHED THEN UPDATE SET
+            status         = source.status,
+            decline_reason = source.decline_reason,
+            updated_at     = source.updated_at
+        WHEN NOT MATCHED THEN INSERT
+            (return_id, order_id, status, name, decline_reason, created_at, updated_at)
+        VALUES
+            (source.return_id, source.order_id, source.status, source.name,
+             source.decline_reason, source.created_at, source.updated_at)
+        """
+        rows = [
+            (
+                _to_int(r.get("id")), _to_int(order_id), r.get("status"),
+                r.get("name"), r.get("decline_reason"),
+                r.get("created_at"), r.get("updated_at"),
+            )
+            for r in returns
+        ]
+        rows = self._dedupe_rows(rows, (0,))
+        ins, upd = self._merge_stats(sql, rows)
+        logger.info(f"Upserted {len(rows)} returns ({ins} inserts, {upd} updates)")
+
+        li_count = self._upsert_return_line_items(returns, order_id)
+        return ins, upd, li_count
+
+    def _upsert_return_line_items(self, returns: list, order_id: int) -> int:
+        sql = """
+        MERGE shopify_return_line_items AS target
+        USING (VALUES (?,?,?,?,?,?,?,?)) AS source
+            (return_line_item_id, return_id, order_id, fulfillment_line_item_id,
+             quantity, reason, reason_notes, customer_note)
+        ON target.return_line_item_id = source.return_line_item_id
+        WHEN MATCHED THEN UPDATE SET
+            quantity      = source.quantity,
+            reason        = source.reason,
+            reason_notes  = source.reason_notes,
+            customer_note = source.customer_note
+        WHEN NOT MATCHED THEN INSERT
+            (return_line_item_id, return_id, order_id, fulfillment_line_item_id,
+             quantity, reason, reason_notes, customer_note)
+        VALUES
+            (source.return_line_item_id, source.return_id, source.order_id,
+             source.fulfillment_line_item_id, source.quantity,
+             source.reason, source.reason_notes, source.customer_note)
+        """
+        rows = []
+        for r in returns:
+            rid = _to_int(r.get("id"))
+            if rid is None:
+                continue
+            for li in (r.get("return_line_items") or []):
+                rows.append((
+                    _to_int(li.get("id")), rid, _to_int(order_id),
+                    _to_int(li.get("fulfillment_line_item_id")),
+                    _to_int(li.get("quantity")),
+                    li.get("reason"), li.get("reason_notes"), li.get("customer_note"),
+                ))
+        rows = self._dedupe_rows(rows, (0,))
+        if rows:
+            self._merge_stats(sql, rows)
+            logger.info(f"Upserted {len(rows)} return line items")
+        return len(rows)
 
     # ------------------------------------------------------------------ #
     # Locations                                                            #

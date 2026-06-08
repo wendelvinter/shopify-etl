@@ -29,7 +29,7 @@ ENV_FILE = ROOT / ".env"
 SCHEDULES_FILE = ROOT / "config" / "schedules.json"
 SCRIPTS_DIR = ROOT / "scripts"
 
-ALLOWED_ETL_SCRIPTS = frozenset({"etl_orders", "etl_fulfillments", "etl_locations"})
+ALLOWED_ETL_SCRIPTS = frozenset({"etl_orders", "etl_fulfillments", "etl_locations", "etl_returns"})
 _schedule_lock = threading.Lock()
 _etl_lock = threading.Lock()
 _ui_logger = logging.getLogger(__name__)
@@ -75,6 +75,16 @@ DEFAULT_SCHEDULES = {
         "every_n": 7,
         "date_range": "last_n_days",
         "days_back": 30,
+    },
+    "etl_returns": {
+        "label": "Returns",
+        "enabled": False,
+        "frequency": "daily",
+        "time": "08:00",
+        "day_of_week": "mon",
+        "every_n": 2,
+        "date_range": "yesterday_today",
+        "days_back": 1,
     },
 }
 
@@ -753,6 +763,7 @@ def render_dashboard(stats, runs, lang: str = "pt"):
           <option value="etl_orders">Orders</option>
           <option value="etl_fulfillments">Fulfillments + Events</option>
           <option value="etl_locations">Locations</option>
+          <option value="etl_returns">Returns</option>
         </select>
       </div>
       <div class="field"><label>{t['label_start_date']}</label><input type="date" id="start-date"></div>
@@ -778,6 +789,7 @@ def render_dashboard(stats, runs, lang: str = "pt"):
           <option value="etl_orders">Orders</option>
           <option value="etl_fulfillments">Fulfillments</option>
           <option value="etl_locations">Locations</option>
+          <option value="etl_returns">Returns</option>
         </select>
         <select id="filter-status" onchange="refreshRuns()" style="font-size:12px;padding:4px 8px;border:1px solid #ddd;border-radius:4px;">
           <option value="">{t['filter_all_status']}</option>
@@ -1781,6 +1793,7 @@ async def api_chart():
             "etl_orders":       "rgba(26,26,26,0.8)",
             "etl_fulfillments": "rgba(100,149,237,0.8)",
             "etl_locations":    "rgba(60,179,113,0.8)",
+            "etl_returns":      "rgba(210,105,30,0.8)",
         }
         datasets = []
         for sc in scripts:

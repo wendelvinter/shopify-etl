@@ -122,6 +122,10 @@ class ShopifyAPIExtractor:
         logger.info("Extracting locations")
         return self._get("locations")
 
+    def get_returns(self, order_id: int) -> list:
+        """Extrai returns (devoluções) de um pedido específico."""
+        return self._get(f"orders/{order_id}/returns")
+
     def get_order_by_id(self, order_id: str) -> list:
         """Extrai um pedido específico pelo ID. Levanta OrderNotFoundError se ausente."""
         logger.info(f"Extracting order {order_id}")
