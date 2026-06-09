@@ -65,11 +65,28 @@ if [ -z "$PYTHON" ]; then
 fi
 
 # 4. Verificar se as dependências estão instaladas
-if ! "$PYTHON" -c "import uvicorn" 2>/dev/null; then
+echo "    Verificando dependências Python..."
+MISSING_DEPS=$("$PYTHON" -c "
+import sys, importlib
+deps = ['fastapi', 'uvicorn', 'requests', 'pyodbc', 'pandas', 'jinja2', 'dotenv', 'apscheduler']
+missing = []
+for mod in deps:
+    try:
+        importlib.import_module(mod.replace('-', '_'))
+    except ImportError:
+        missing.append(mod)
+if missing:
+    print(' '.join(missing))
+" 2>/dev/null)
+
+if [ -n "$MISSING_DEPS" ]; then
     echo ""
-    echo "[!] ERRO: uvicorn não encontrado. Rode: pip install -r requirements.txt"
+    echo "[!] ERRO: Dependências faltando: $MISSING_DEPS"
+    echo "    Rode: pip install -r requirements.txt"
     exit 1
 fi
+
+echo "    Todas as dependências OK."
 
 # 5. Iniciar o servidor
 echo ""

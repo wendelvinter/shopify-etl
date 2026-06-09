@@ -19,9 +19,23 @@ shopify_etl/
 ## Pré-requisitos
 
 - Python 3.10+
-- ODBC Driver 17 for SQL Server instalado
+- ODBC Driver 17 ou 18 for SQL Server instalado
 - Acesso à API do Shopify (Access Token)
 - SQL Server acessível na rede
+
+### Linux: instalar ODBC Driver
+
+```bash
+# Ubuntu/Debian
+curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add -
+curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list > /etc/apt/sources.list.d/mssql-release.list
+apt-get update
+ACCEPT_EULA=Y apt-get install -y msodbcsql18
+
+# RHEL/CentOS
+curl https://packages.microsoft.com/config/rhel/8/prod.repo > /etc/yum.repos.d/mssql-release.repo
+ACCEPT_EULA=Y yum install -y msodbcsql18
+```
 
 ## Instalação
 
@@ -30,20 +44,18 @@ shopify_etl/
 git clone https://github.com/sua-org/shopify_etl.git
 cd shopify_etl
 
-# 2. Criar ambiente virtual
-python -m venv venv
-venv\Scripts\activate  # Windows
-
-# 3. Instalar dependências
+# 2. Instalar dependências (Linux — system Python)
 pip install -r requirements.txt
 
-# 4. Configurar variáveis de ambiente
-copy .env.example .env
+# Windows (dev local): opcionalmente use venv
+# python -m venv venv && venv\Scripts\activate && pip install -r requirements.txt
+
+# 3. Configurar variáveis de ambiente
+cp .env.example .env
 # Editar .env com suas credenciais
 
-# 5. Criar tabelas no SQL Server (rodar uma única vez)
-# Abrir o SQL Server Management Studio e executar:
-# sql/create_tables.sql
+# 4. Criar tabelas no SQL Server (rodar uma única vez)
+# Executar sql/create_tables.sql no SQL Server
 ```
 
 ## Uso
@@ -51,11 +63,11 @@ copy .env.example .env
 ### Interface de controle (recomendado)
 
 ```bash
-cd ui
-uvicorn main:app --host 0.0.0.0 --port 8000
+cd ui && uvicorn main:app --host 0.0.0.0 --port 8500
+# Ou use: bash fix_port.sh
 ```
 
-Acessar: `http://localhost:8000`
+Acessar: `http://localhost:8500`
 
 ### Linha de comando
 
@@ -70,21 +82,36 @@ python scripts/etl_orders.py
 python scripts/etl_fulfillments.py
 ```
 
-## Agendamento (Windows Task Scheduler)
+## Agendamento (Linux)
 
-Criar duas tarefas agendadas para rodar diariamente às 06:00:
+### Opção 1: Via interface web (recomendado)
 
-```
-Programa: C:\shopify_etl\venv\Scripts\python.exe
-Argumentos: C:\shopify_etl\scripts\etl_orders.py
-Pasta: C:\shopify_etl
+O scheduler integrado na UI (`/setup`) gerencia execuções automáticas com suporte a daily, weekdays, weekly e intervalos customizáveis.
+
+### Opção 2: Cron
+
+```bash
+# Executar diariamente às 06:00
+0 6 * * * cd /opt/shopify-etl && python scripts/etl_orders.py >> logs/cron.log 2>&1
+0 7 * * * cd /opt/shopify-etl && python scripts/etl_fulfillments.py >> logs/cron.log 2>&1
 ```
 
+### Opção 3: Systemd timer
+
+```ini
+# /etc/systemd/system/shopify-etl.service
+[Unit]
+Description=Shopify ETL Orders Daily
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/shopify-etl
+ExecStart=/usr/bin/python3 scripts/etl_orders.py
 ```
-Programa: C:\shopify_etl\venv\Scripts\python.exe
-Argumentos: C:\shopify_etl\scripts\etl_fulfillments.py
-Pasta: C:\shopify_etl
-```
+
+### Ambientes Windows
+
+Para dev local Windows, use o scheduler integrado na UI (APScheduler) que roda junto com o servidor FastAPI.
 
 ## Tabelas geradas no SQL Server
 
