@@ -42,18 +42,49 @@ if ($still) {
     Write-Host "   Porta $Port liberada." -ForegroundColor Green
 }
 
-# 3. Verificar se o venv existe
-if (-not (Test-Path ".\venv\Scripts\python.exe")) {
+# 3. Encontrar o Python (system python primeiro, venv como fallback)
+$Python = $null
+$PythonSource = ""
+
+# Tenta python do PATH (Linux/WSL ou Windows com Python no PATH)
+$systemPy = Get-Command python -ErrorAction SilentlyContinue
+if ($systemPy) {
+    $Python = $systemPy.Source
+    $PythonSource = "PATH"
+}
+
+# Fallback: venv local (dev Windows)
+if (-not $Python -and (Test-Path ".\venv\Scripts\python.exe")) {
+    $Python = ".\venv\Scripts\python.exe"
+    $PythonSource = "venv"
+}
+
+if (-not $Python) {
     Write-Host ""
-    Write-Host "[!] ERRO: venv nao encontrado em .\venv\Scripts\python.exe" -ForegroundColor Red
-    Write-Host "    Crie o venv com: python -m venv venv"
-    Write-Host "    Depois: .\venv\Scripts\pip install -r requirements.txt"
+    Write-Host "[!] ERRO: Python nao encontrado." -ForegroundColor Red
+    Write-Host "    Instale o Python e adicione ao PATH, ou crie um venv:"
+    Write-Host "      python -m venv venv"
+    Write-Host "      .\venv\Scripts\pip install -r requirements.txt"
     exit 1
 }
 
-# 4. Iniciar o servidor
+Write-Host "    Usando Python: $Python ($PythonSource)" -ForegroundColor Green
+
+# 4. Verificar se uvicorn esta instalado
+$uvicornCheck = & $Python -c "import uvicorn" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "[!] ERRO: Dependencias nao encontradas." -ForegroundColor Red
+    Write-Host "    Rode: pip install -r requirements.txt"
+    if ($PythonSource -eq "venv") {
+        Write-Host "    Ou: .\venv\Scripts\pip install -r requirements.txt"
+    }
+    exit 1
+}
+
+# 5. Iniciar o servidor
 Write-Host ""
 Write-Host "[2] Iniciando servidor ETL na porta $Port..." -ForegroundColor Cyan
 Write-Host "    Pressione Ctrl+C para parar."
 Write-Host ""
-& .\venv\Scripts\python.exe -m uvicorn ui.main:app --host 0.0.0.0 --port $Port
+& $Python -m uvicorn ui.main:app --host 0.0.0.0 --port $Port

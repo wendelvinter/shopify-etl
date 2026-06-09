@@ -32,5 +32,10 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Claude Code
+.claude/
+.claude-flow/
+.swarm/
+
 # Runtime
 config/config_changes.json
