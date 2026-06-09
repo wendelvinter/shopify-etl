@@ -1,8 +1,8 @@
-# fix_port.ps1 - Libera a porta 8000 e reinicia o servidor ETL
+# fix_port.ps1 - Libera a porta 8500 e reinicia o servidor ETL
 # Uso: powershell -ExecutionPolicy Bypass -File fix_port.ps1
 
 param(
-    [int]$Port = 8000
+    [int]$Port = 8500
 )
 
 Set-Location $PSScriptRoot

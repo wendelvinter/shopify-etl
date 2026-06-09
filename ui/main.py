@@ -1,7 +1,7 @@
 """
 Interface de controle do ETL — Shopify -> SQL Server
-Dashboard: http://localhost:8000
-Setup:     http://localhost:8000/setup
+Dashboard: http://localhost:8500
+Setup:     http://localhost:8500/setup
 """
 import html
 import logging
