@@ -263,6 +263,7 @@ async def lifespan(_):
 app = FastAPI(title="Shopify ETL Control Panel", lifespan=lifespan)
 
 _oauth_states: dict = {}
+_pending_tokens: dict = {}   # uuid -> {"token": str, "shop": str, "expires": float}
 _running_procs: dict = {}
 
 CONFIG_CHANGES_FILE = ROOT / "config" / "config_changes.json"
@@ -1097,7 +1098,7 @@ def _sched_card(name: str, cfg: dict, next_run: str, t: dict) -> str:
 </div>"""
 
 
-def render_setup(oauth_success: bool = False, lang: str = "pt") -> str:
+def render_setup(oauth_success: bool = False, lang: str = "pt", pending_token: dict = None) -> str:
     t = TRANSLATIONS[lang]
     env = read_env()
     schedules = load_schedules()
@@ -1138,10 +1139,53 @@ def render_setup(oauth_success: bool = False, lang: str = "pt") -> str:
         for name, cfg in schedules.items()
     )
 
-    oauth_banner = f"""
+    if oauth_success:
+        oauth_banner = f"""
   <div class="card" style="background:#d4edda;border-color:#c3e6cb;">
     <p style="color:#155724;font-size:14px;font-weight:600;">{t["oauth_success_msg"]}</p>
-  </div>""" if oauth_success else ""
+  </div>"""
+    elif pending_token:
+        _pt = pending_token["token"]
+        _ps = pending_token["shop"]
+        _tk = pending_token["tk"]
+        oauth_banner = f"""
+  <div class="card" style="background:#fff3cd;border-color:#ffc107;">
+    <div class="card-header"><h2>&#128274; Access Token gerado</h2></div>
+    <p style="font-size:13px;color:#856404;margin-bottom:12px;">
+      Loja: <strong>{html.escape(_ps)}</strong><br>
+      Revise o token abaixo e clique em <strong>Salvar no .env</strong> para confirmar.
+    </p>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+      <input id="preview-token" type="password" value="{html.escape(_pt)}"
+             style="font-family:monospace;font-size:13px;width:100%;padding:6px 8px;border:1px solid #ccc;border-radius:4px;"
+             readonly>
+      <button type="button" onclick="toggleToken()" style="white-space:nowrap;padding:6px 12px;border:1px solid #aaa;border-radius:4px;background:#fff;cursor:pointer;">
+        Mostrar
+      </button>
+      <button type="button" onclick="copyToken()" style="white-space:nowrap;padding:6px 12px;border:1px solid #aaa;border-radius:4px;background:#fff;cursor:pointer;">
+        Copiar
+      </button>
+    </div>
+    <form method="POST" action="/api/setup/confirm-token" style="display:inline;">
+      <input type="hidden" name="tk" value="{html.escape(_tk)}">
+      <button type="submit" style="padding:8px 20px;background:#28a745;color:#fff;border:none;border-radius:4px;font-weight:600;cursor:pointer;">
+        &#10003; Salvar no .env
+      </button>
+      <a href="/setup" style="margin-left:12px;font-size:13px;color:#666;">Descartar</a>
+    </form>
+  </div>
+  <script>
+    function toggleToken() {{
+      var f = document.getElementById('preview-token');
+      f.type = f.type === 'password' ? 'text' : 'password';
+    }}
+    function copyToken() {{
+      var f = document.getElementById('preview-token');
+      navigator.clipboard.writeText(f.value).then(function(){{ alert('Token copiado!'); }});
+    }}
+  </script>"""
+    else:
+        oauth_banner = ""
 
     sched_badge_text = t["apscheduler_active"] if HAS_SCHEDULER else t["apscheduler_missing"]
 
@@ -1454,9 +1498,17 @@ async def home(request: Request):
 
 
 @app.get("/setup", response_class=HTMLResponse)
-async def setup_page(request: Request, oauth: str = ""):
+async def setup_page(request: Request, oauth: str = "", tk: str = ""):
     lang = get_lang(request)
-    return HTMLResponse(render_setup(oauth_success=(oauth == "success"), lang=lang))
+    pending = None
+    if oauth == "preview" and tk:
+        now = time.time()
+        entry = _pending_tokens.get(tk)
+        if entry and now < entry["expires"]:
+            pending = {"token": entry["token"], "shop": entry["shop"], "tk": tk}
+        else:
+            _pending_tokens.pop(tk, None)
+    return HTMLResponse(render_setup(oauth_success=(oauth == "success"), lang=lang, pending_token=pending))
 
 
 @app.post("/api/setup/oauth-credentials")
@@ -1545,11 +1597,29 @@ async def shopify_callback(request: Request, code: str = "", hmac: str = "", sho
             status_code=400,
         )
 
+    import uuid as _uuid
+    token_key = _uuid.uuid4().hex
+    _pending_tokens[token_key] = {
+        "token": access_token,
+        "shop": f"https://{callback_shop}",
+        "expires": time.time() + 300,
+    }
+    return RedirectResponse(f"/setup?oauth=preview&tk={token_key}")
+
+
+@app.post("/api/setup/confirm-token")
+async def confirm_token(tk: str = Form(...)):
+    now = time.time()
+    entry = _pending_tokens.pop(tk, None)
+    if not entry or now >= entry["expires"]:
+        return RedirectResponse("/setup?oauth=expired", status_code=303)
     write_env({
-        "SHOPIFY_ACCESS_TOKEN": access_token,
-        "SHOPIFY_STORE_URL": f"https://{callback_shop}",
+        "SHOPIFY_ACCESS_TOKEN": entry["token"],
+        "SHOPIFY_STORE_URL": entry["shop"],
     })
-    return RedirectResponse("/setup?oauth=success")
+    from config.constants import reload_config
+    reload_config()
+    return RedirectResponse("/setup?oauth=success", status_code=303)
 
 
 @app.post("/run-etl")
