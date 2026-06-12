@@ -214,21 +214,33 @@ class SQLServerLoader:
 
     def _delete_orphans(self, table: str, id_col: str, parent_col: str,
                         parent_ids: list, keep_ids: list):
+        # Tabelas temporárias em vez de IN (?,?,...): o SQL Server aceita no
+        # máximo ~2100 parâmetros por statement, e cargas grandes estouravam
+        # esse limite (erro HY000 "parameter markers").
         if not parent_ids:
             return
-        placeholders_p = ",".join("?" * len(parent_ids))
-        if keep_ids:
-            placeholders_k = ",".join("?" * len(keep_ids))
-            sql = (
-                f"DELETE FROM {table} WHERE {parent_col} IN ({placeholders_p}) "
-                f"AND {id_col} NOT IN ({placeholders_k})"
+        self.cursor.execute("CREATE TABLE #orphan_parents (id BIGINT PRIMARY KEY)")
+        self.cursor.execute("CREATE TABLE #orphan_keep (id BIGINT PRIMARY KEY)")
+        try:
+            self.cursor.executemany(
+                "INSERT INTO #orphan_parents (id) VALUES (?)",
+                [(int(p),) for p in dict.fromkeys(parent_ids)],
             )
-            self.cursor.execute(sql, parent_ids + keep_ids)
-        else:
-            sql = f"DELETE FROM {table} WHERE {parent_col} IN ({placeholders_p})"
-            self.cursor.execute(sql, parent_ids)
-        if self.cursor.rowcount:
-            logger.info(f"Removed {self.cursor.rowcount} orphan rows from {table}")
+            if keep_ids:
+                self.cursor.executemany(
+                    "INSERT INTO #orphan_keep (id) VALUES (?)",
+                    [(int(k),) for k in dict.fromkeys(keep_ids)],
+                )
+            self.cursor.execute(
+                f"DELETE FROM {table} "
+                f"WHERE {parent_col} IN (SELECT id FROM #orphan_parents) "
+                f"AND {id_col} NOT IN (SELECT id FROM #orphan_keep)"
+            )
+            if self.cursor.rowcount:
+                logger.info(f"Removed {self.cursor.rowcount} orphan rows from {table}")
+        finally:
+            self.cursor.execute("DROP TABLE #orphan_parents")
+            self.cursor.execute("DROP TABLE #orphan_keep")
 
     def _upsert_order_line_items(self, orders: list):
         sql = """
